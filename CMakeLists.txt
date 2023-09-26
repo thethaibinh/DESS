@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.2)
 
 project(dess)
 
-# set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 17)
 # set(CMAKE_VERBOSE_MAKEFILE ON)
 
 set(CMAKE_BUILD_TYPE Debug)
@@ -21,14 +21,19 @@ catkin_package(
 	CATKIN_DEPENDS
 )
 
-include_directories(include ${catkin_INCLUDE_DIRS})
+# submodules sources
+add_subdirectory(modules/ruckig)
+
+# planner sources
+include_directories(modules/ruckig/include include ${catkin_INCLUDE_DIRS})
 add_subdirectory(src)
 
 add_executable(main main.cpp)
 target_link_libraries(main
 					  dess
 					  RapidQuadcopterTrajectories
-					  Quartic
+					  RootFinder
+					  ruckig
 					  ${OpenCV_LIBS}
 					  ${catkin_LIBRARIES}
                       Boost::program_options)

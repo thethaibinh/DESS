@@ -1,0 +1,3 @@
+[submodule "ruckig"]
+	path = modules/ruckig
+	url = git@github.com:binhnt94/ruckig.git

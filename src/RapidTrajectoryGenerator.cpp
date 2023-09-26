@@ -26,7 +26,7 @@
 #include <limits>
 #include <cerrno>
 #include "RapidQuadcopterTrajectories/RapidTrajectoryGenerator.hpp"
-#include "Quartic/quartic.h"
+#include "RootFinder/quartic.h"
 
 using namespace CommonMath;
 using namespace RapidQuadrocopterTrajectoryGenerator;
@@ -190,10 +190,10 @@ RapidTrajectoryGenerator::StateFeasibilityResult RapidTrajectoryGenerator::Check
 
   size_t rootCount;
   if (fabs(c[0]) > 1e-6) {
-    rootCount = Quartic::solve_quartic(c[1] / c[0], c[2] / c[0], c[3] / c[0],
+    rootCount = RootFinder::solve_quartic(c[1] / c[0], c[2] / c[0], c[3] / c[0],
                                        c[4] / c[0], roots);
   } else {
-    rootCount = Quartic::solveP3(c[2] / c[1], c[3] / c[1], c[4] / c[1], roots);
+    rootCount = RootFinder::solveP3(c[2] / c[1], c[3] / c[1], c[4] / c[1], roots);
   }
 
   for (unsigned i = 0; i < (rootCount + 2); i++) {

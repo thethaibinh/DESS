@@ -17,14 +17,14 @@
  * along with the code.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "RectangularPyramidPlanner/DepthImagePlanner.hpp"
+#include "RectangularPyramidPlanner/steering_planner.hpp"
 
 using namespace std::chrono;
 using namespace CommonMath;
 using namespace RapidQuadrocopterTrajectoryGenerator;
 using namespace RectangularPyramidPlanner;
 
-DepthImagePlanner::DepthImagePlanner(cv::Mat depthImage, double depthScale,
+SteeringPlanner::SteeringPlanner(cv::Mat depthImage, double depthScale,
                                      double focalLength, double principalPointX,
                                      double principalPointY,
                                      double physicalVehicleRadius,
@@ -49,47 +49,62 @@ DepthImagePlanner::DepthImagePlanner(cv::Mat depthImage, double depthScale,
       _allocatedComputationTime(0),  // To be set when the planner is called
       _numTrajectoriesGenerated(0),
       _numCollisionChecks(0),
-      _pyramidSearchPixelBuffer(2)  // A sample point must be more than 2 pixels away from the edge of a pyramid to use that pyramid for collision checking
+      _pyramidSearchPixelBuffer(2),  // A sample point must be more than 2 pixels away from the edge of a pyramid to use that pyramid for collision checking
+      _steering_amount(0)
 {
   _depthData = reinterpret_cast<const uint16_t*>(depthImage.data);
 }
 
-bool DepthImagePlanner::FindFastestTrajRandomCandidates(
-    RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+bool SteeringPlanner::FindFastestTrajRandomCandidates(
+    int8_t sampling_mode,
+    ruckig::InputParameter<3>& initial_state,
+    ruckig::Trajectory<3>& opt_trajectory,
+    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime, CommonMath::Vec3 explorationDirection) {
 
   ExplorationCost explorationCost(explorationDirection);
   return FindLowestCostTrajectoryRandomCandidates(
-      trajectory, allocatedComputationTime, &explorationCost,
-      &ExplorationCost::ExplorationDirectionCostWrapper);
+      sampling_mode,
+      initial_state,
+      opt_trajectory,
+      allocatedComputationTime, &explorationCost,
+      &ExplorationCost::direction_cost_wrapper);
 }
 
-bool DepthImagePlanner::FindLowestCostTrajectoryRandomCandidates(
-    RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
+    int8_t sampling_mode,
+    ruckig::InputParameter<3>& initial_state,
+    ruckig::Trajectory<3>& opt_trajectory,
+    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime,
     void* costFunctionDefinitionObject,
     double (*costFunctionWrapper)(
         void* costFunctionDefinitionObject,
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator&)) {
+        ruckig::Trajectory<3>&)) {
 
-  RandomTrajectoryGenerator trajGenObj(this);
+  RandomTrajectoryGenerator trajGenObj(this, sampling_mode);
   return FindLowestCostTrajectory(
-      trajectory, allocatedComputationTime, costFunctionDefinitionObject,
+      initial_state,
+      opt_trajectory,
+      allocatedComputationTime, costFunctionDefinitionObject,
       costFunctionWrapper, (void*) &trajGenObj,
-      &RandomTrajectoryGenerator::GetNextCandidateTrajectoryWrapper);
+      &RandomTrajectoryGenerator::get_next_time_optimal_trajectory_wrapper);
 }
 
-bool DepthImagePlanner::FindLowestCostTrajectory(
-    RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+bool SteeringPlanner::FindLowestCostTrajectory(
+    ruckig::InputParameter<3>& initial_state,
+    ruckig::Trajectory<3>& opt_trajectory,
+    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime,
     void* costFunctionDefinitionObject,
     double (*costFunctionWrapper)(
         void* costFunctionDefinitionObject,
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator&),
+        ruckig::Trajectory<3>&),
     void* trajectoryGeneratorObject,
     int (*trajectoryGeneratorWrapper)(
         void* trajectoryGeneratorObject,
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& nextTraj)) {
+        ruckig::InputParameter<3>& initial_state,
+        ruckig::Trajectory<3>& nextTraj)) {
 
   // Start timing the planner
   _startTime = high_resolution_clock::now();
@@ -98,16 +113,6 @@ bool DepthImagePlanner::FindLowestCostTrajectory(
   bool feasibleTrajFound = false;
   double bestCost = std::numeric_limits<double>::max();
 
-  // Get the initial state of the vehicle so we can initialize all of the candidate trajectories
-  Vec3 pos0 = trajectory.GetPosition(0);
-  Vec3 vel0 = trajectory.GetVelocity(0);
-  Vec3 acc0 = trajectory.GetAcceleration(0);
-  Vec3 grav = trajectory.GetGravityVector();
-
-  // We assume that the initial state is written in the camera-fixed frame
-  assert(pos0.x == 0 && pos0.y == 0 && pos0.z == 0);
-
-  RapidTrajectoryGenerator candidateTraj(pos0, vel0, acc0, grav);
   while (true) {
 
     if (duration_cast<microseconds>(high_resolution_clock::now() - _startTime)
@@ -116,8 +121,9 @@ bool DepthImagePlanner::FindLowestCostTrajectory(
     }
 
     // Get the next candidate trajectory to evaluate using the provided trajectory generator
+    ruckig::Trajectory<3> candidateTraj;
     int returnVal = (*trajectoryGeneratorWrapper)(trajectoryGeneratorObject,
-                                                  candidateTraj);
+                                                  initial_state, candidateTraj);
     if (returnVal < 0) {
       // There are no more candidate trajectories to check. This case should only be reached if
       // the candidate trajectory generator is designed to only give a finite number of candidates
@@ -127,27 +133,23 @@ bool DepthImagePlanner::FindLowestCostTrajectory(
     _numTrajectoriesGenerated++;
 
     // Compute the cost of the trajectory using the provided cost function
-    double cost = (*costFunctionWrapper)(costFunctionDefinitionObject,
-                                         candidateTraj);
+    double cost = (*costFunctionWrapper)(costFunctionDefinitionObject, candidateTraj);
     if (cost < bestCost) {
       // The trajectory is a lower cost than lowest cost trajectory found so far
-
-      // Check whether the trajectory is dynamically feasible
-      RapidTrajectoryGenerator::InputFeasibilityResult res = candidateTraj
-          .CheckInputFeasibility(_minimumAllowedThrust, _maximumAllowedThrust,
-                                 _maximumAllowedAngularVelocity,
-                                 _minimumSectionTimeDynamicFeas);
-      if (res == RapidTrajectoryGenerator::InputFeasible) {
-        // The trajectory is dynamically feasible
-
-        // Check whether the trajectory collides with obstacles
-        bool isCollisionFree = IsCollisionFree(candidateTraj.GetTrajectory());
-        _numCollisionChecks++;
-        if (isCollisionFree) {
-          feasibleTrajFound = true;
-          bestCost = cost;
-          trajectory = RapidTrajectoryGenerator(candidateTraj);
-        }
+      // Check whether the trajectory collides with obstacles
+      // bool isCollisionFree = IsCollisionFree(candidateTraj.GetTrajectory());
+      // First split trajectory into possible 7 segment as described in the profile then check every one of them.
+      std::vector<SegmentThirdOrder> segments = get_segments(candidateTraj);
+      bool isCollisionFree = true;
+      for (size_t i = 0; i < segments.size(); i++)
+      {
+        isCollisionFree &= is_segment_collision_free(segments[i]);
+      }
+      _numCollisionChecks++;
+      if (isCollisionFree) {
+        feasibleTrajFound = true;
+        bestCost = cost;
+        opt_trajectory = candidateTraj;
       }
     }
   }
@@ -155,28 +157,112 @@ bool DepthImagePlanner::FindLowestCostTrajectory(
   if (feasibleTrajFound) {
     return true;
   } else {
+    _steering_amount = scan_depth();
     return false;
   }
 }
 
-bool DepthImagePlanner::IsCollisionFree(Trajectory trajectory) {
+int SteeringPlanner::scan_depth() {
+  // We don't look at any pixels closer than this distance (e.g. if the
+  // propellers are in the field of view)
+  uint16_t ignoreDist = uint16_t(_trueVehicleRadius / _depthScale);
+  // For reading the depth value stored in a given pixel.
+  uint16_t pixDist;
+  // Store the minimum depth pixel value of the expanded pyramid. The base plane
+  // of the final pyramid will be this value minus the vehicle radius.
+  uint16_t min_depth_value = std::numeric_limits<uint16_t>::max();
+  int min_depth_x, min_depth_y;
+  for (int y = 0; y < _imageHeight; y++) {
+    for (int x = 0; x < _imageWidth; x++) {
+      pixDist = _depthData[y * _imageWidth + x];
+      if (pixDist <= min_depth_value && pixDist > ignoreDist) {
+        min_depth_value = std::min(min_depth_value, pixDist);
+        min_depth_x = x;
+        min_depth_y = y;
+      }
+    }
+  }
+  if (min_depth_x < _cx) {
+    return 1;
+  }
 
-  // Split trajectory into sections with monotonically changing depth
-  std::vector<MonotonicTrajectory> monotonicSections = GetMonotonicSections(
-      trajectory);
+  else {
+    return -1;
+  }
+}
+
+std::vector<SegmentThirdOrder> SteeringPlanner::get_segments(
+  const ruckig::Trajectory<3> traj) {
+  std::vector<SegmentThirdOrder> segments;
+
+  auto profile_array = traj.get_profiles();
+  // We only consider one-target-waypoint trajectory
+  assert(profile_array.size() == 1);
+  auto profiles = profile_array[0];
+  // Confirming there are 3 DOFs in a trajectory
+  size_t num_dof = profiles.size();
+  assert(num_dof == 3);
+
+  // Adding two possible pre-trajectories (brake/accel) if there is any
+  double brake_duration = profiles[0].brake.duration;
+  if (brake_duration > 1e-6) {
+    Vec3 j =
+      Vec3(profiles[0].brake.j[0], profiles[1].j[0], profiles[2].brake.j[0]);
+    Vec3 a0 = Vec3(profiles[0].brake.a[0], profiles[1].brake.a[0],
+                   profiles[2].brake.a[0]);
+    Vec3 v0 = Vec3(profiles[0].brake.v[0], profiles[1].brake.v[0],
+                   profiles[2].brake.v[0]);
+    Vec3 p0 = Vec3(profiles[0].brake.p[0], profiles[1].brake.p[0],
+                   profiles[2].brake.p[0]);
+
+    segments.push_back(SegmentThirdOrder(j, a0, v0, p0, 0.0, brake_duration));
+  }
+  double accel_duration = profiles[0].accel.duration;
+  if (accel_duration > 1e-6) {
+    Vec3 j =
+      Vec3(profiles[0].accel.j[0], profiles[1].j[0], profiles[2].accel.j[0]);
+    Vec3 a0 = Vec3(profiles[0].accel.a[0], profiles[1].accel.a[0],
+                   profiles[2].accel.a[0]);
+    Vec3 v0 = Vec3(profiles[0].accel.v[0], profiles[1].accel.v[0],
+                   profiles[2].accel.v[0]);
+    Vec3 p0 = Vec3(profiles[0].accel.p[0], profiles[1].accel.p[0],
+                   profiles[2].accel.p[0]);
+    segments.push_back(SegmentThirdOrder(j, a0, v0, p0, 0.0, accel_duration));
+  }
+
+  // Then adding possible 7 sections of the trajectory
+  size_t num_sec = profiles[0].t.size();
+  assert(num_sec == 7);
+  for (size_t i = 0; i < num_sec; i++) {
+    double endTime = profiles[0].t[i];
+    if (fabs(endTime) < 1e-6) continue;
+    Vec3 j = Vec3(profiles[0].j[i], profiles[1].j[i], profiles[2].j[i]);
+    Vec3 a0 = Vec3(profiles[0].a[i], profiles[1].a[i], profiles[2].a[i]);
+    Vec3 v0 = Vec3(profiles[0].v[i], profiles[1].v[i], profiles[2].v[i]);
+    Vec3 p0 = Vec3(profiles[0].p[i], profiles[1].p[i], profiles[2].p[i]);
+
+    segments.push_back(SegmentThirdOrder(j, a0, v0, p0, 0.0, endTime));
+  }
+  return segments;
+}
+
+bool SteeringPlanner::is_segment_collision_free(SegmentThirdOrder segment) {
+  // Split segment into sections with monotonically changing depth
+  std::vector<MonotonicSegment> monotonicSections =
+    get_monotonic_segments(segment);
   while (monotonicSections.size() > 0) {
-
     // Check if we've used up all of our computation time
     if (duration_cast<microseconds>(high_resolution_clock::now() - _startTime)
-        .count() > int(_allocatedComputationTime * 1e6)) {
+          .count() > int(_allocatedComputationTime * 1e6)) {
       return false;
     }
 
     // Get a monotonic section to check
-    MonotonicTrajectory monoTraj = monotonicSections.back();
+    MonotonicSegment monoTraj = monotonicSections.back();
     monotonicSections.pop_back();
 
-    // Find the pixel corresponding to the endpoint of this section (deepest depth)
+    // Find the pixel corresponding to the endpoint of this section (deepest
+    // depth)
     Vec3 startPoint, endPoint;
     if (monoTraj.increasingDepth) {
       startPoint = monoTraj.GetValue(monoTraj.GetStartTime());
@@ -186,7 +272,8 @@ bool DepthImagePlanner::IsCollisionFree(Trajectory trajectory) {
       endPoint = monoTraj.GetValue(monoTraj.GetStartTime());
     }
 
-    // Ignore the trajectory section if it's closer than the minimum collision checking distance
+    // Ignore the segment section if it's closer than the minimum collision
+    // checking distance
     if (startPoint.z < _minCheckingDist && endPoint.z < _minCheckingDist) {
       continue;
     }
@@ -195,24 +282,24 @@ bool DepthImagePlanner::IsCollisionFree(Trajectory trajectory) {
     double endPointPixel[2];
     ProjectPointToPixel(endPoint, endPointPixel[0], endPointPixel[1]);
     Pyramid collisionCheckPyramid;
-    bool pyramidFound = FindContainingPyramid(endPointPixel[0],
-                                              endPointPixel[1], endPoint.z,
-                                              collisionCheckPyramid);
+    bool pyramidFound = FindContainingPyramid(
+      endPointPixel[0], endPointPixel[1], endPoint.z, collisionCheckPyramid);
     if (!pyramidFound) {
       // No pyramids containing endPoint were found, try to make a new pyramid
-      if (_pyramids.size() >= _maxNumPyramids
-          || _pyramidGenTimeNanoseconds > _maxPyramidGenTime * 1e9) {
+      if (_pyramids.size() >= _maxNumPyramids ||
+          _pyramidGenTimeNanoseconds > _maxPyramidGenTime * 1e9) {
         // We've already exceeded the maximum number of allowed pyramids or
         // the maximum time allocated for pyramid generation.
         return false;
       }
 
       high_resolution_clock::time_point startInflate =
-          high_resolution_clock::now();
+        high_resolution_clock::now();
       bool pyramidGenerated = InflatePyramid(endPointPixel[0], endPointPixel[1],
                                              endPoint.z, collisionCheckPyramid);
-      _pyramidGenTimeNanoseconds += duration_cast<nanoseconds>(
-          high_resolution_clock::now() - startInflate).count();
+      _pyramidGenTimeNanoseconds +=
+        duration_cast<nanoseconds>(high_resolution_clock::now() - startInflate)
+          .count();
 
       if (pyramidGenerated) {
         // Insert the new pyramid into the list of pyramids found so far
@@ -225,71 +312,68 @@ bool DepthImagePlanner::IsCollisionFree(Trajectory trajectory) {
       }
     }
 
-    // Check if/when the trajectory intersects a lateral face of the given pyramid.
+    // Check if/when the segment intersects a lateral face of the given pyramid.
     double collisionTime;
-    bool collidesWithPyramid = FindDeepestCollisionTime(monoTraj,
-                                                        collisionCheckPyramid,
-                                                        collisionTime);
+    bool collidesWithPyramid =
+      FindDeepestCollisionTime(monoTraj, collisionCheckPyramid, collisionTime);
 
     if (collidesWithPyramid) {
-      // The trajectory collides with at least lateral face of the pyramid. Split the trajectory where it intersects,
-      // and add the section outside the pyramid for further collision checking.
+      // The segment collides with at least lateral face of the pyramid. Split
+      // the segment where it intersects, and add the section outside the
+      // pyramid for further collision checking.
       if (monoTraj.increasingDepth) {
-        monotonicSections.push_back(
-            MonotonicTrajectory(monoTraj.GetCoeffs(), monoTraj.GetStartTime(),
-                                collisionTime));
+        monotonicSections.push_back(MonotonicSegment(
+          monoTraj.GetCoeffs(), monoTraj.GetStartTime(), collisionTime));
       } else {
-        monotonicSections.push_back(
-            MonotonicTrajectory(monoTraj.GetCoeffs(), collisionTime,
-                                monoTraj.GetEndTime()));
+        monotonicSections.push_back(MonotonicSegment(
+          monoTraj.GetCoeffs(), collisionTime, monoTraj.GetEndTime()));
       }
     }
   }
   return true;
 }
 
-std::vector<MonotonicTrajectory> DepthImagePlanner::GetMonotonicSections(
-    Trajectory trajectory) {
-  // This function exploits the property described in Section II.B of the RAPPIDS paper
+std::vector<MonotonicSegment> SteeringPlanner::get_monotonic_segments(
+  SegmentThirdOrder segment) {
+  // This function exploits the property described in Section II.B of the
+  // RAPPIDS paper
 
   // Compute the coefficients of \dot{d}_z(t)
-  std::vector<Vec3> trajDerivativeCoeffs = trajectory.GetDerivativeCoeffs();
-  double c[5] = { trajDerivativeCoeffs[0].z, trajDerivativeCoeffs[1].z,
-      trajDerivativeCoeffs[2].z, trajDerivativeCoeffs[3].z,
-      trajDerivativeCoeffs[4].z };  // Just shortening the names
+  std::vector<Vec3> trajDerivativeCoeffs = segment.GetDerivativeCoeffs();
+  double c[3] = {trajDerivativeCoeffs[0].z, trajDerivativeCoeffs[1].z,
+                 trajDerivativeCoeffs[2].z};  // Just shortening the names
 
-  // Compute the times at which the trajectory changes direction along the z-axis
-  double roots[6];
-  roots[0] = trajectory.GetStartTime();
-  roots[1] = trajectory.GetEndTime();
+  // Compute the times at which the segment changes direction along the z-axis
+  double roots[4];
+  roots[0] = segment.GetStartTime();
+  roots[1] = segment.GetEndTime();
   size_t rootCount;
-  if (fabs(c[0]) > 1e-6) {
-    rootCount = Quartic::solve_quartic(c[1] / c[0], c[2] / c[0], c[3] / c[0],
-                                       c[4] / c[0], roots + 2);
-  } else {
-    rootCount = Quartic::solveP3(c[2] / c[1], c[3] / c[1], c[4] / c[1],
-                                 roots + 2);
-  }
-  std::sort(roots, roots + rootCount + 2);  // Use rootCount + 2 because we include the start and end point
+  rootCount = RootFinder::solve_quadratic(c[2], c[1], c[0], roots + 2);
+  std::sort(
+    roots,
+    roots + rootCount +
+      2);  // Use rootCount + 2 because we include the start and end point
 
-  std::vector<MonotonicTrajectory> monotonicSections;
-// We don't iterate until rootCount + 2 because we need to find pairs of roots
+  std::vector<MonotonicSegment> monotonicSections;
+  // We don't iterate until rootCount + 2 because we need to find pairs of roots
   for (unsigned i = 0; i < rootCount + 1; i++) {
-    if (roots[i] < trajectory.GetStartTime()) {
+    if (roots[i] < segment.GetStartTime()) {
       // Skip root if it's before start time
       continue;
     } else if (fabs(roots[i] - roots[i + 1]) < 1e-6) {
       // Skip root because it's a duplicate
       continue;
-    } else if (roots[i] >= trajectory.GetEndTime()) {
+    } else if (roots[i] >= segment.GetEndTime()) {
       // We're done because the roots are in ascending order
       break;
     }
-    // Add a section between the current root and the next root after checking that the next root is valid
-    // We already know that roots[i+1] is greater than the start time because roots[i] is greater than the start time and roots is sorted
-    if (roots[i + 1] <= trajectory.GetEndTime()) {
+    // Add a section between the current root and the next root after checking
+    // that the next root is valid We already know that roots[i+1] is greater
+    // than the start time because roots[i] is greater than the start time and
+    // roots is sorted
+    if (roots[i + 1] <= segment.GetEndTime()) {
       monotonicSections.push_back(
-          MonotonicTrajectory(trajectory.GetCoeffs(), roots[i], roots[i + 1]));
+        MonotonicSegment(segment.GetCoeffs(), roots[i], roots[i + 1]));
     } else {
       // We're done because the next section is out of the range
       break;
@@ -299,24 +383,24 @@ std::vector<MonotonicTrajectory> DepthImagePlanner::GetMonotonicSections(
   return monotonicSections;
 }
 
-bool DepthImagePlanner::FindContainingPyramid(double pixelX, double pixelY,
-                                              double depth,
-                                              Pyramid &outPyramid) {
+bool SteeringPlanner::FindContainingPyramid(double pixelX, double pixelY,
+                                            double depth, Pyramid& outPyramid) {
   // This function searches _pyramids for those with base planes at deeper
   // depths than endPoint.z
-  auto firstPyramidIndex = std::lower_bound(_pyramids.begin(), _pyramids.end(),
-                                            depth);
+  auto firstPyramidIndex =
+    std::lower_bound(_pyramids.begin(), _pyramids.end(), depth);
   if (firstPyramidIndex != _pyramids.end()) {
     // At least one pyramid exists that has a base plane deeper than endPoint.z
     for (std::vector<Pyramid>::iterator it = firstPyramidIndex;
-        it != _pyramids.end(); ++it) {
+         it != _pyramids.end(); ++it) {
       // Check whether endPoint is inside the pyramid
-      // We need to use the _pyramidSearchPixelBuffer offset here because otherwise we'll try to
-      // collision check with the pyramid we just exited while checking the previous section
-      if ((*it).leftPixBound + _pyramidSearchPixelBuffer < pixelX
-          && pixelX < (*it).rightPixBound - _pyramidSearchPixelBuffer
-          && (*it).topPixBound + _pyramidSearchPixelBuffer < pixelY
-          && pixelY < (*it).bottomPixBound - _pyramidSearchPixelBuffer) {
+      // We need to use the _pyramidSearchPixelBuffer offset here because
+      // otherwise we'll try to collision check with the pyramid we just exited
+      // while checking the previous section
+      if ((*it).leftPixBound + _pyramidSearchPixelBuffer < pixelX &&
+          pixelX < (*it).rightPixBound - _pyramidSearchPixelBuffer &&
+          (*it).topPixBound + _pyramidSearchPixelBuffer < pixelY &&
+          pixelY < (*it).bottomPixBound - _pyramidSearchPixelBuffer) {
         outPyramid = *it;
         return true;
       }
@@ -325,10 +409,11 @@ bool DepthImagePlanner::FindContainingPyramid(double pixelX, double pixelY,
   return false;
 }
 
-bool DepthImagePlanner::FindDeepestCollisionTime(MonotonicTrajectory monoTraj,
-                                                 Pyramid pyramid,
-                                                 double& outCollisionTime) {
-  // This function exploits the property described in Section II.C of the RAPPIDS paper
+bool SteeringPlanner::FindDeepestCollisionTime(MonotonicSegment monoTraj,
+                                               Pyramid pyramid,
+                                               double& outCollisionTime) {
+  // This function exploits the property described in Section II.C of the
+  // RAPPIDS paper
 
   bool collidesWithPyramid = false;
   if (monoTraj.increasingDepth) {
@@ -338,27 +423,25 @@ bool DepthImagePlanner::FindDeepestCollisionTime(MonotonicTrajectory monoTraj,
   }
   std::vector<Vec3> coeffs = monoTraj.GetCoeffs();
   for (Vec3 normal : pyramid.planeNormals) {
-
-    // Compute the coefficients of d(t) (distance to the lateral face of the pyramid)
-    double c[5] = { 0, 0, 0, 0, 0 };
+    // Compute the coefficients of d(t) (distance to the lateral face of the
+    // pyramid)
+    double c[4] = {0, 0, 0, 0};
     for (int dim = 0; dim < 3; dim++) {
-      c[0] += normal[dim] * coeffs[0][dim];  //t**5
-      c[1] += normal[dim] * coeffs[1][dim];  //t**4
-      c[2] += normal[dim] * coeffs[2][dim];  //t**3
-      c[3] += normal[dim] * coeffs[3][dim];  //t**2
-      c[4] += normal[dim] * coeffs[4][dim];  //t
-      // coeffs[5] = (0,0,0) because trajectory is at (0,0,0) at t = 0
+      c[0] += normal[dim] * coeffs[0][dim];  // t^3
+      c[1] += normal[dim] * coeffs[1][dim];  // t^2
+      c[2] += normal[dim] * coeffs[2][dim];  // t
+      c[3] += normal[dim] * coeffs[3][dim];  // constant
     }
 
     // Find the times at which the trajectory intersects the plane
-    double roots[4];
+    double roots[3];
     size_t rootCount;
+    // reducing to finding quadratic roots due to root zero isolation
     if (fabs(c[0]) > 1e-6) {
-      rootCount = Quartic::solve_quartic(c[1] / c[0], c[2] / c[0], c[3] / c[0],
-                                         c[4] / c[0], roots);
+      rootCount =
+        RootFinder::solveP3(c[1] / c[0], c[2] / c[0], c[3] / c[0], roots);
     } else {
-      rootCount = Quartic::solveP3(c[2] / c[1], c[3] / c[1], c[4] / c[1],
-                                   roots);
+      rootCount = RootFinder::solve_quadratic(c[3], c[2], c[1], roots);
     }
     std::sort(roots, roots + rootCount);
     if (monoTraj.increasingDepth) {
@@ -368,8 +451,9 @@ bool DepthImagePlanner::FindDeepestCollisionTime(MonotonicTrajectory monoTraj,
           continue;
         } else if (roots[i] > monoTraj.GetStartTime()) {
           if (roots[i] > outCollisionTime) {
-            // This may seem unnecessary because we are searching an ordered list, but this check is needed
-            // because we are checking multiple lateral faces of the pyramid for collisions
+            // This may seem unnecessary because we are searching an ordered
+            // list, but this check is needed because we are checking multiple
+            // lateral faces of the pyramid for collisions
             outCollisionTime = roots[i];
             collidesWithPyramid = true;
             break;
@@ -398,8 +482,8 @@ bool DepthImagePlanner::FindDeepestCollisionTime(MonotonicTrajectory monoTraj,
   return collidesWithPyramid;
 }
 
-bool DepthImagePlanner::InflatePyramid(int x0, int y0, double minimumDepth,
-                                       Pyramid &outPyramid) {
+bool SteeringPlanner::InflatePyramid(int x0, int y0, double minimumDepth,
+                                     Pyramid& outPyramid) {
   // This function is briefly described by Section III.A. of the RAPPIDS paper
 
   // First check if the sample point violates the field of view constraints
@@ -913,147 +997,3 @@ bool DepthImagePlanner::InflatePyramid(int x0, int y0, double minimumDepth,
 
   return true;
 }
-
-void DepthImagePlanner::MeasureConservativeness(
-    int numTrajToEvaluate, int pyramidLimit,
-    RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
-    int &numIncorrectInCollision, int &numCorrectInCollision) {
-  // The test described in Section IV.A of the RAPPIDS paper
-
-  SetMaxNumberOfPyramids(pyramidLimit);
-  numIncorrectInCollision = 0;
-  numCorrectInCollision = 0;
-
-  // Generate trajectories used to evaluate the collision checker
-  RandomTrajectoryGenerator trajGenObj(this);
-  std::vector<Trajectory> trajs;
-  trajs.reserve(numTrajToEvaluate);
-  for (int i = 0; i < numTrajToEvaluate; i++) {
-    trajGenObj.GetNextCandidateTrajectory(trajectory);
-    trajs.push_back(trajectory.GetTrajectory());
-  }
-
-  // Run our collision checker and compare to the results of the ground truth ray-tracing based method
-  for (auto candidateTraj : trajs) {
-    _startTime = std::chrono::high_resolution_clock::now();  // Prevents collision checking from ending early due to timing constraints
-    _allocatedComputationTime = 1000;
-    bool collidesPlanner = !IsCollisionFree(candidateTraj);
-    bool collidesGroundTruth = !IsCollisionFreeGroundTruth(candidateTraj);
-    if (collidesGroundTruth && collidesPlanner) {
-      numCorrectInCollision++;
-    } else if (collidesPlanner && !collidesGroundTruth) {
-      numIncorrectInCollision++;
-    }
-  }
-}
-
-void DepthImagePlanner::MeasureCollisionCheckingSpeed(
-    int numTrajToEvaluate, double pyramidGenTimeLimit,
-    RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
-    double &outTotalCollCheckTimeNs, double &outPercentCollisionFree) {
-  // The test described in Section IV.B of the RAPPIDS paper
-
-  SetMaxPyramidGenTime(pyramidGenTimeLimit);
-
-  // Generate the trajectories used in the test
-  RandomTrajectoryGenerator trajGenObj(this);
-  std::vector<Trajectory> trajs;
-  trajs.reserve(numTrajToEvaluate);
-  for (int i = 0; i < numTrajToEvaluate; i++) {
-    trajGenObj.GetNextCandidateTrajectory(trajectory);
-    trajs.push_back(trajectory.GetTrajectory());
-  }
-
-  int numCollisionFree = 0;
-  bool hasFeasTraj = false;
-
-  outTotalCollCheckTimeNs = 0;
-  for (auto candidateTraj : trajs) {
-    _startTime = std::chrono::high_resolution_clock::now();  // Prevents collision checking from ending early due to timing constraints
-    _allocatedComputationTime = 1000;
-    bool isCollisionFree = IsCollisionFree(candidateTraj);
-    outTotalCollCheckTimeNs += duration_cast<nanoseconds>(
-        high_resolution_clock::now() - _startTime).count();
-    if (isCollisionFree) {
-      numCollisionFree++;
-      hasFeasTraj = true;
-    }
-  }
-  outTotalCollCheckTimeNs -= _pyramidGenTimeNanoseconds;  // Don't count time spent generating pyramids
-  outPercentCollisionFree = double(numCollisionFree)
-      / double(numTrajToEvaluate);
-
-  if (hasFeasTraj) {
-    outPercentCollisionFree = 1;
-  }
-}
-
-bool DepthImagePlanner::IsCollisionFreeGroundTruth(Trajectory trajectory) {
-
-  // Use this timestep to discretize the trajectory. This number should be small (but too small = very long collision checking times)
-  double timestep = 0.1;
-  // Ignore any pixels within the sphere around the vehicle (e.g. propellers that might be in the FOV of the depth camera)
-  uint16_t ignoreDist = uint16_t(_trueVehicleRadius / _depthScale);
-  // Declare any point that is too close to the edge of the image as violating the field of view constraints
-  int imageEdgeOffset = _focalLength * _trueVehicleRadius / _minCheckingDist;
-
-  // Check FOV constraints first because this is the fastest thing to check
-  for (double t = trajectory.GetStartTime(); t < trajectory.GetEndTime(); t +=
-      timestep) {
-    Vec3 trajPos = trajectory.GetValue(t);
-
-    if (trajPos.z < _minCheckingDist) {
-      continue;
-    }
-
-    // Check FOV constraints
-    double pixX, pixY;
-    ProjectPointToPixel(trajPos, pixX, pixY);
-    if (pixX <= imageEdgeOffset || pixX > _imageWidth - imageEdgeOffset
-        || pixY <= imageEdgeOffset || pixY > _imageHeight - imageEdgeOffset) {
-      // Trajectory violates FOV constraints
-      return false;
-    }
-  }
-
-  // For each point along the trajectory, check that each pixel doesn't occlude or intersect with the sphere around the vehicle
-  for (double t = trajectory.GetStartTime(); t < trajectory.GetEndTime(); t +=
-      timestep) {
-    Vec3 trajPos = trajectory.GetValue(t);
-
-    if (trajPos.z < _minCheckingDist) {
-      continue;
-    }
-
-    for (int y = 0; y < _imageHeight; y++) {
-      for (int x = 0; x < _imageWidth; x++) {
-        // Ignore pixels that are too close
-        if (_depthData[y * _imageWidth + x] > ignoreDist) {
-          // Compute where the ray that pierces the current pixel intersects with the sphere around the vehicle
-          Vec3 e = Vec3((x - _cx) / _focalLength, (y - _cy) / _focalLength, 1.0)
-              .GetUnitVector();
-          double underSqrt = pow(trajPos.Dot(e), 2) - trajPos.GetNorm2Squared()
-              + pow(_vehicleRadiusForPlanning, 2);
-          if (underSqrt >= 0) {
-            // Ray collides with sphere of vehicle
-            // Check if pixel is behind sphere
-            double secondCollisionDist = e.Dot(trajPos) + sqrt(underSqrt);
-            Vec3 pixPos;
-            DeprojectPixelToPoint(x, y,
-                                  _depthData[y * _imageWidth + x] * _depthScale,
-                                  pixPos);
-            double pixDist = pixPos.GetNorm2();
-            if (pixDist < secondCollisionDist) {
-              // Pixel is inside or in front of the vehicle sphere
-              return false;
-            }
-          }
-          // Else: ray does not collide with vehicle sphere
-        }
-      }
-    }
-  }
-
-  return true;
-}
-

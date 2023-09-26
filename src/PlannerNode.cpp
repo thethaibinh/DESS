@@ -8,9 +8,10 @@
 #include <opencv2/opencv.hpp>
 #include <random>
 #include <string>
-#include "RectangularPyramidPlanner/SteeringPlanner.hpp"
+#include "RectangularPyramidPlanner/steering_planner.hpp"
 #include "RapidQuadcopterTrajectories/SteeringTrajectoryGenerator.hpp"
 #include "ros/ros.h"
+#include <ros/console.h>
 #include "std_msgs/String.h"
 #include "std_msgs/Bool.h"
 #include "std_msgs/Int8.h"
@@ -24,13 +25,17 @@
 #include <sensor_msgs/CameraInfo.h>
 #include <sensor_msgs/PointCloud2.h>
 
+// Ruckig
+#include <ruckig/ruckig.hpp>
+// using namespace ruckig;
+
 // ROS TF2
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_ros/transform_listener.h>
 #include "tf2_ros/message_filter.h"
 
 //this is a global definition of the points to be used
-//changes to omit color would need adaptations in 
+//changes to omit color would need adaptations in
 //the visualization too
 #include <pcl/io/io.h>
 #include <pcl_conversions/pcl_conversions.h>
@@ -52,8 +57,8 @@ class PlannerNode
 public:
   PlannerNode() :
     to_world_tf2(to_world_buffer),
-    to_camera_tf2(to_camera_buffer),  
-    camera_frame("camera"), 
+    to_camera_tf2(to_camera_buffer),
+    camera_frame("camera"),
     world_frame("world"),
     steering_sent(false),
     sampling_mode(0),
@@ -78,28 +83,28 @@ public:
   }
 
   // Callback for planning when a new depth image comes
-  void msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) 
+  void msgCallback(const sensor_msgs::ImageConstPtr& depth_msg)
   {
     cv_bridge::CvImageConstPtr cv_img_ptr = cv_bridge::toCvShare(depth_msg, depth_msg->encoding);
     cv::Mat depth_mat;
     // RAPPIDS use depth images in 16UC1 format
     cv_img_ptr->image.convertTo(depth_mat, CV_16UC1, 65535);
-    
-    double width = depth_mat.cols; 
+
+    double width = depth_mat.cols;
     double height = depth_mat.rows;
     double fov = 90.0f;
     double cx = width / 2.0f;
     double cy = height / 2.0f;
     // double fx = (width / 2.0f) / tan((M_PI * fov / 180.0f) / 2.0f);
     // double fy = (height / 2.0f) / tan((M_PI * fov / 180.0f) / 2.0f);
-    // We use camera intrinsics matrix value from Flightmare 
+    // We use camera intrinsics matrix value from Flightmare
     // with FoV 90 degrees and resolution 320x240
     double fx, fy;
     fx = fy = 130.839769;
 
     // pixelValues = depth / depth_scale
     // e.g. 1 meter = 1000 pixel value for depth_scale = 0.001
-    // depth_scale in 32FC1 is 100, 
+    // depth_scale in 32FC1 is 100,
     // then in 16UC1, depth_scale is 100/(2^16-1) = 0.00152590218f
     SteeringPlanner planner(depth_mat, 0.0015259f,
                               fx, cx,
@@ -108,18 +113,18 @@ public:
                               0.55f,
                               0.65f);
 
-    // Rotation matrix to express a vector in body (camera-fixed) frame 
-    // to world frame. The matrix is formed from the quaternion 
-    // that express the body attitude in world frame. 
+    // Rotation matrix to express a vector in body (camera-fixed) frame
+    // to world frame. The matrix is formed from the quaternion
+    // that express the body attitude in world frame.
     // The transformation is simply follow:
     // vector_in_world_frame = rotation * vector_in_body_frame
     // vector_in_body_frame = rotation / vector_in_world_frame
     Vec3 vel, accel;
     {
         const std::lock_guard<std::mutex> lock(state_mutex_);
-        Rotation rotation(_state.pose.orientation.w, 
-                      _state.pose.orientation.x, 
-                      _state.pose.orientation.y, 
+        Rotation rotation(_state.pose.orientation.w,
+                      _state.pose.orientation.x,
+                      _state.pose.orientation.y,
                       _state.pose.orientation.z);
         Vec3 temp = rotation / Vec3(_state.velocity.linear.x,
                                     _state.velocity.linear.y,
@@ -131,14 +136,19 @@ public:
         accel = Vec3(-temp.y, -temp.z, temp.x);
     }
 
-    SteeringTrajectoryGenerator traj(
-        Vec3(0,0,0),
-        vel,
-        accel,
-        // Vec3(0,0,0),
-        // Vec3(0,0,0),
-        Vec3(0, 9.8066f, 0));
-    
+    ROS_INFO("InputParameter!");
+    ruckig::InputParameter<3> initial_state;
+    initial_state.current_position = {0.0, 0.0, 0.0};
+    initial_state.current_velocity = {vel.x, vel.y, vel.z};
+    initial_state.current_acceleration = {accel.x, accel.y, accel.z};
+
+    initial_state.target_velocity = {0.0, 0.0, 0.0};
+    initial_state.target_acceleration = {0.0, 0.0, 0.0};
+
+    initial_state.max_velocity = {3.0, 3.0, 3.0};
+    initial_state.max_acceleration = {5.0, 5.0, 5.0};
+    initial_state.max_jerk = {15.0, 15.0, 15.0};
+
     // Lookup for transforms in the TF2 transforming tree
     geometry_msgs::TransformStamped transform_to_camera, transform_to_world;
     try{
@@ -152,39 +162,42 @@ public:
     catch (tf2::TransformException &ex) {
       ROS_WARN("%s",ex.what());
     }
-    
-    // Transform the coordinate of goal_in_world_frame to 
+
+    // Transform the coordinate of goal_in_world_frame to
     // the coordinate of goal_in_camera_frame
     geometry_msgs::PointStamped goal_in_camera_frame, goal_in_world_frame;
     goal_in_world_frame.header.frame_id = world_frame;
     goal_in_world_frame.header.stamp = ros::Time::now();
-    goal_in_world_frame.point.x = 18; 
-    goal_in_world_frame.point.y = 0; 
+    goal_in_world_frame.point.x = 18;
+    goal_in_world_frame.point.y = 0;
     goal_in_world_frame.point.z = 5;
-    try 
+    try
     {
-      tf2::doTransform(goal_in_world_frame, 
+      tf2::doTransform(goal_in_world_frame,
                       goal_in_camera_frame,
                       transform_to_camera);
     }
-    catch (tf2::TransformException &ex) 
+    catch (tf2::TransformException &ex)
     {
       ROS_WARN("Failure %s\n", ex.what()); //Print exception which was caught
     }
-    
+
     // Build exploration_vector from the coordinate of goal_in_camera_frame
-    Vec3 exploration_vector(-goal_in_camera_frame.point.y, 
-                              -goal_in_camera_frame.point.z, 
+    Vec3 exploration_vector(-goal_in_camera_frame.point.y,
+                              -goal_in_camera_frame.point.z,
                               goal_in_camera_frame.point.x);
-    
+
     // Stop planning when the goal is less than 1.5m close.
     if (exploration_vector.GetNorm2() < 2)
     {
-      // Publish generated trajectory                                         
+      // Publish generated trajectory
       geometry_msgs::Pose trajectory_msg;
-      trajectory_msg.position.x = goal_in_world_frame.point.x;
-      trajectory_msg.position.y = goal_in_world_frame.point.y;
-      trajectory_msg.position.z = goal_in_world_frame.point.z;
+      // trajectory_msg.position.x = goal_in_world_frame.point.x;
+      // trajectory_msg.position.y = goal_in_world_frame.point.y;
+      // trajectory_msg.position.z = goal_in_world_frame.point.z;
+      trajectory_msg.position.x = 18.0f;
+      trajectory_msg.position.y = 0.0f;
+      trajectory_msg.position.z = 5.0f;
       trajectory_msg.orientation.w = 1;
       // orientation.x = 0 means we are sending conventional trajectories
       // orientation.z = 0 means the steering value = 0
@@ -195,36 +208,37 @@ public:
       last_generated_time = depth_msg->header.stamp.toSec();
       return;
     }
-    
+    ruckig::Trajectory<3> otp_traj;
     // Find the fastest trajectory candidate
-    if (!planner.FindFastestTrajRandomCandidates(sampling_mode, 
-                                                traj, 0.003,
-                                                exploration_vector))
-    {
-      // We only sent steering commands when we could not find 
+    if (!planner.FindFastestTrajRandomCandidates(sampling_mode, initial_state,
+                                                 otp_traj,
+                                                 0.02, exploration_vector)) {
+      // We only sent steering commands when we could not find
       // any feasible trajectory for 1 second in a row.
       if (((depth_msg->header.stamp.toSec() - last_generated_time) < 1)
           || steering_sent)
       {
         return;
       }
-      // Publish generated trajectory                                         
+      // Publish generated trajectory
       geometry_msgs::Pose trajectory_msg;
       geometry_msgs::PointStamped traj_in_world_frame, traj_in_camera_frame;
       // Build traj_in_camera_frame from fastest trajectory found (traj)
       // and transforming it into traj_in_world_frame
       traj_in_camera_frame.header.frame_id = camera_frame;
       traj_in_camera_frame.header.stamp = ros::Time::now();
-      traj_in_camera_frame.point.x = traj.GetPosition(traj.GetFinalTime()).z; 
-      traj_in_camera_frame.point.y = -traj.GetPosition(traj.GetFinalTime()).x; 
-      traj_in_camera_frame.point.z = -traj.GetPosition(traj.GetFinalTime()).y;
-      try 
+      std::array<double, 3> endpoint_position;
+      otp_traj.at_time(otp_traj.get_duration(), endpoint_position);
+      traj_in_camera_frame.point.x = endpoint_position[2];
+      traj_in_camera_frame.point.y = -endpoint_position[0];
+      traj_in_camera_frame.point.z = -endpoint_position[1];
+      try
       {
-        tf2::doTransform(traj_in_camera_frame, 
+        tf2::doTransform(traj_in_camera_frame,
                           traj_in_world_frame,
                           transform_to_world);
       }
-      catch (tf2::TransformException &ex) 
+      catch (tf2::TransformException &ex)
       {
         ROS_WARN("Failure %s\n", ex.what()); //Print exception which was caught
       }
@@ -232,6 +246,9 @@ public:
       trajectory_msg.position.x = traj_in_world_frame.point.x;
       trajectory_msg.position.y = traj_in_world_frame.point.y;
       trajectory_msg.position.z = traj_in_world_frame.point.z;
+      // trajectory_msg.position.x = 18.0f;
+      // trajectory_msg.position.y = 0.0f;
+      // trajectory_msg.position.z = 5.0f;
       // For convenience purposes, orientation.x = 1 means we are sending steering commands
       // we use orientation.z for steering value
       trajectory_msg.orientation.w = 1;
@@ -241,21 +258,24 @@ public:
       steering_sent = true;
       return;
     }
-    // Publish generated trajectory                                         
+    // Publish generated trajectory
     geometry_msgs::Pose trajectory_msg;
     geometry_msgs::PointStamped traj_in_world_frame, traj_in_camera_frame;
     traj_in_camera_frame.header.frame_id = camera_frame;
     traj_in_camera_frame.header.stamp = ros::Time::now();
-    traj_in_camera_frame.point.x = traj.GetPosition(traj.GetFinalTime()).z; 
-    traj_in_camera_frame.point.y = -traj.GetPosition(traj.GetFinalTime()).x; 
-    traj_in_camera_frame.point.z = -traj.GetPosition(traj.GetFinalTime()).y;
-    try 
+    // double duration = otp_traj.get_duration();
+    std::array<double, 3> endpoint_position;
+    otp_traj.at_time(otp_traj.get_duration(), endpoint_position);
+    traj_in_camera_frame.point.x = endpoint_position[2];
+    traj_in_camera_frame.point.y = -endpoint_position[0];
+    traj_in_camera_frame.point.z = -endpoint_position[1];
+    try
     {
-      tf2::doTransform(traj_in_camera_frame, 
+      tf2::doTransform(traj_in_camera_frame,
                         traj_in_world_frame,
                         transform_to_world);
     }
-    catch (tf2::TransformException &ex) 
+    catch (tf2::TransformException &ex)
     {
       ROS_WARN("Failure %s\n", ex.what()); //Print exception which was caught
     }
@@ -280,7 +300,7 @@ private:
   ros::Publisher trajectoty_pub, point_cloud_pub, visual_pub;
   ros::Subscriber sampling_mode_sub, image_sub, state_sub;
   dodgeros_msgs::QuadState _state;
-  bool steering_sent; 
+  bool steering_sent;
   int8_t sampling_mode;
   double last_generated_time;
   std::mutex state_mutex_;

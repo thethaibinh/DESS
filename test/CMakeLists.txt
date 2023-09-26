@@ -2,7 +2,7 @@ add_executable(Benchmarker Benchmarker.cpp)
 target_link_libraries(Benchmarker
 					  RAPPIDS
 					  RapidQuadcopterTrajectories
-					  Quartic
+					  RootFinder
 					  ${OpenCV_LIBS}
                       Boost::program_options)
 

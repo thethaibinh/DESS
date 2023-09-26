@@ -26,15 +26,22 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 #include "CommonMath/Vec3.hpp"
-#include "CommonMath/Trajectory.hpp"
-#include "Quartic/quartic.h"
-#include "RapidQuadcopterTrajectories/RapidTrajectoryGenerator.hpp"
+#include "CommonMath/segment.hpp"
+#include "RootFinder/quartic.h"
+#include "RapidQuadcopterTrajectories/SteeringTrajectoryGenerator.hpp"
 #include "RectangularPyramidPlanner/Pyramid.hpp"
-#include "RectangularPyramidPlanner/MonotonicTrajectory.hpp"
+#include "RectangularPyramidPlanner/monotonic_segment.hpp"
+
+// Ruckig
+#include <ruckig/ruckig.hpp>
+#include <ruckig/profile.hpp>
+
+#define DEPTH_UPPER_BOUND 3.0
+#define DEPTH_LOWER_BOUND 1.0
 
 namespace RectangularPyramidPlanner {
 
-class DepthImagePlanner {
+class SteeringPlanner {
  public:
 
   //! Constructor. Requires a depth image and the related camera intrinsics
@@ -54,7 +61,7 @@ class DepthImagePlanner {
    * them to be labeled as in collision). This is used to enforce field of view constraints as well; we assume there is an
    * obstacle just outside of the field of view this distance away from the camera. [meters]
    */
-  DepthImagePlanner(cv::Mat depthImage, double depthScale, double focalLength,
+  SteeringPlanner(cv::Mat depthImage, double depthScale, double focalLength,
                     double principalPointX, double principalPointY,
                     double physicalVehicleRadius,
                     double vehicleRadiusForPlanning,
@@ -63,7 +70,8 @@ class DepthImagePlanner {
   //! Finds the trajectory that travels the fastest in the given exploration direction. The default settings of
   //! RandomTrajectoryGenerator are used to generate candidate trajectories.
   /*!
-   * @param trajectory A trajectory that defines the state of the vehicle when the depth image was taken
+   * @param sampling_mode integer variable that specifies whether we use the depth-aware technique in sampling or not
+   * @param opt_trajectory A trajectory that defines the state of the vehicle when the depth image was taken
    * @param allocatedComputationTime The planner will exit after this amount of time has passed [seconds]
    * @param explorationDirection The direction used in evaluating the cost of each trajectory. More distance
    * along explorationDirection in less time equals a lower cost.
@@ -71,13 +79,16 @@ class DepthImagePlanner {
    * the argument trajectory will be updated to contain the lowest cost trajectory found.
    */
   bool FindFastestTrajRandomCandidates(
-      RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+      int8_t sampling_mode,
+      ruckig::InputParameter<3>& initial_state,
+      ruckig::Trajectory<3>& opt_trajectory,
       double allocatedComputationTime, CommonMath::Vec3 explorationDirection);
 
   //! Finds the trajectory with the lowest user-provided cost. The default settings of
   //! RandomTrajectoryGenerator are used to generate candidate trajectories.
   /*!
-   * @param trajectory A trajectory that defines the state of the vehicle when the depth image was taken
+   * @param sampling_mode integer variable that specifies whether we use the depth-aware technique in sampling or not
+   * @param opt_trajectory A trajectory that defines the state of the vehicle when the depth image was taken
    * @param allocatedComputationTime The planner will exit after this amount of time has passed [seconds]
    * @param costFunctionDefinitionObject This object must define the cost function to be used to evaluate
    * each of the candidate trajectories. The member variables of this object can be used to evaluate the cost
@@ -89,17 +100,20 @@ class DepthImagePlanner {
    * the argument trajectory will be updated to contain the lowest cost trajectory found.
    */
   bool FindLowestCostTrajectoryRandomCandidates(
-      RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+      int8_t sampling_mode,
+      ruckig::InputParameter<3>& initial_state,
+      ruckig::Trajectory<3>& opt_trajectory,
       double allocatedComputationTime,
       void* costFunctionDefinitionObject,
       double (*costFunctionWrapper)(
           void* costFunctionDefinitionObject,
-          RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator&));
+          ruckig::Trajectory<3>&));
 
   //! Finds the trajectory with the lowest user-provided cost using a user-provided
   //! trajectory generator.
   /*!
-   * @param trajectory A trajectory that defines the state of the vehicle when the depth image was taken
+   * @param sampling_mode integer variable that specifies whether we use the depth-aware technique in sampling or not
+   * @param opt_trajectory A trajectory that defines the state of the vehicle when the depth image was taken
    * @param allocatedComputationTime The planner will exit after this amount of time has passed [seconds]
    * @param costFunctionDefinitionObject This object must define the cost function to be used to evaluate
    * each of the candidate trajectories. The member variables of this object can be used to evaluate the cost
@@ -116,16 +130,25 @@ class DepthImagePlanner {
    * the argument trajectory will be updated to contain the lowest cost trajectory found.
    */
   bool FindLowestCostTrajectory(
-      RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
+      ruckig::InputParameter<3>& initial_state,
+      ruckig::Trajectory<3>& opt_trajectory,
       double allocatedComputationTime,
       void* costFunctionDefinitionObject,
       double (*costFunctionWrapper)(
           void* costFunctionDefinitionObject,
-          RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator&),
+          ruckig::Trajectory<3>&),
       void* trajectoryGeneratorObject,
       int (*trajectoryGeneratorWrapper)(
           void* trajectoryGeneratorObject,
-          RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& nextTraj));
+          ruckig::InputParameter<3>& initial_state,
+          ruckig::Trajectory<3>& nextTraj));
+
+  /*!
+   * @return the steering amount
+   */
+  float get_steering() {
+    return _steering_amount;
+  }
 
   /*!
    * @return A vector containing all of the generated pyramids
@@ -226,46 +249,6 @@ class DepthImagePlanner {
     outY = point.y * _focalLength / point.z + _cy;
   }
 
-  //! Computes how many trajectories we mislabel as being in-collision for a given scenario
-  //! (depth image + initial state)
-  /*!
-   * @param numTrajToEvaluate The number of random trajectories to generate. Each trajectory is checked
-   * for collisions using our method and a ground truth ray tracing based method, and the result is compared.
-   * @param pyramidLimit The maximum number of pyramids allowed to be generated
-   * @param trajectory A trajectory used to define the initial state of the vehicle
-   * @param numIncorrectInCollision The number of trajectories incorrectly labeled as being in-collision
-   * @param numCorrectInCollision The number of trajectories correctly labeled as being in-collision
-   */
-  void MeasureConservativeness(
-      int numTrajToEvaluate,
-      int pyramidLimit,
-      RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
-      int &numIncorrectInCollision, int &numCorrectInCollision);
-
-  //! Computes the amount of time spent checking a given number of trajectories for collisions for a given
-  //! scenario (depth image + initial state)
-  /*!
-   * @param numTrajToEvaluate The number of random trajectories to generate. Each trajectory is checked
-   * for collisions, and the total time spend checking trajectories for collisions is recored.
-   * @param pyramidGenTimeLimit The maximum time allowed to be spent generating pyramids.
-   * @param trajectory A trajectory used to define the initial state of the vehicle
-   * @param outTotalCollCheckTime The total amount of time spent checking the candidate trajectories for collisions
-   * [seconds]
-   */
-  void MeasureCollisionCheckingSpeed(
-      int numTrajToEvaluate,
-      double pyramidGenTimeLimit,
-      RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& trajectory,
-      double &outTotalCollCheckTime, double &outPercentCollisionFree);
-
-  //! Uses a ray tracing based collision checking method to check the given trajectory for collisions
-  //! This is used in the MeasureConservativeness function to evaluate the conservativeness of our planner.
-  /*!
-   * @param trajectory The trajectory to be checked for collisions
-   * @return True if the trajectory is found to be in collision, false otherwise
-   */
-  bool IsCollisionFreeGroundTruth(CommonMath::Trajectory trajectory);
-
   //! Class used to generate random candidate trajectories for the planner to evaluate.
   //! All generated trajectories come to rest at the end of their duration.
   class RandomTrajectoryGenerator {
@@ -274,17 +257,18 @@ class DepthImagePlanner {
     //! those pixels to 3D points with depths uniformly sampled between 1.5 and 3 meters.
     //! The duration of each trajectory is sampled uniformly between 2 and 3 seconds.
     /*!
-     * @param planner Pointer to the DepthImagePlanner object that will use the generated trajectories.
+     * @param planner Pointer to the SteeringPlanner object that will use the generated trajectories.
      * We include this pointer so that we can call the DeprojectPixelToPoint function defined by the
-     * DepthImagePlanner object which uses the associated camera intrinsics.
+     * SteeringPlanner object which uses the associated camera intrinsics.
      */
-    RandomTrajectoryGenerator(DepthImagePlanner *planner)
+    RandomTrajectoryGenerator(SteeringPlanner *planner, int8_t sampling_mode)
         : _pixelX(0, planner->GetImageWidth()),
           _pixelY(0, planner->GetImageHeight()),
-          _depth(1.5, 3),
+          _depth(1.0, 3),
           _time(2, 3),
           _gen(_rd()),
-          _planner(planner) {
+          _planner(planner),
+          _sampling_mode(sampling_mode) {
     }
     //! Constructor allowing for custom bounds on the sampling distributions used to generate the trajectories.
     /*!
@@ -296,43 +280,77 @@ class DepthImagePlanner {
      * @param maxDepth Only sample trajectories that come to rest closer than this distance from the focal point [meters]
      * @param minTime Minimum trajectory duration [seconds]
      * @param maxTime Maximum trajectory duration [seconds]
-     * @param planner Pointer to the DepthImagePlanner object that will use the generated trajectories.
+     * @param planner Pointer to the SteeringPlanner object that will use the generated trajectories.
      * We include this pointer so that we can call the DeprojectPixelToPoint function defined by the
-     * DepthImagePlanner object which uses the associated camera intrinsics.
+     * SteeringPlanner object which uses the associated camera intrinsics.
      */
     RandomTrajectoryGenerator(int minXpix, int maxXpix, int minYpix,
                               int maxYpix, double minDepth, double maxDepth,
                               double minTime, double maxTime,
-                              DepthImagePlanner *planner)
+                              SteeringPlanner *planner,
+                              int8_t sampling_mode)
         : _pixelX(minXpix, maxXpix),
           _pixelY(minYpix, maxYpix),
           _depth(minDepth, maxDepth),
           _time(minTime, maxTime),
           _gen(_rd()),
-          _planner(planner) {
+          _planner(planner),
+          _sampling_mode(sampling_mode) {
     }
     //! Returns a random candidate trajectory to be evaluated by the planner.
-    int GetNextCandidateTrajectory(
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& nextTraj) {
+    int get_next_time_optimal_trajectory(ruckig::InputParameter<3>& initial_state,
+                                     ruckig::Trajectory<3>& candidateTraj) {
       CommonMath::Vec3 posf;
-      _planner->DeprojectPixelToPoint(_pixelX(_gen), _pixelY(_gen),
+      ruckig::Ruckig<3> otg;
+      // Depth-aware sampling and correcting velocity vector's direction toward goal direction
+      if (_sampling_mode == 2)
+      {
+        uint16_t gen_x = _pixelX(_gen);
+        uint16_t gen_y = _pixelY(_gen);
+        double gen_depth = _depth(_gen);
+        double pixel_depth = _planner->_depthScale * _planner->_depthData[gen_y * _planner->_imageWidth + gen_x];
+        double sampled_depth = (pixel_depth - 3.0)*(pixel_depth - 1.0) <= 0 ?
+        (gen_depth - DEPTH_LOWER_BOUND) / (DEPTH_UPPER_BOUND - DEPTH_LOWER_BOUND)
+        * (pixel_depth - DEPTH_LOWER_BOUND) + DEPTH_LOWER_BOUND : gen_depth;
+        _planner->DeprojectPixelToPoint(gen_x, gen_y,
+                                        sampled_depth,
+                                        posf);
+
+        initial_state.target_position = {posf.x, posf.y, posf.z};
+        // Calculate the trajectory in an offline manner (outside of the control loop)
+        ruckig::Result result = otg.calculate(initial_state, candidateTraj);
+      }
+      else if (_sampling_mode == 1)
+      {
+        _planner->DeprojectPixelToPoint(_pixelX(_gen), _pixelY(_gen),
                                       _depth(_gen), posf);
-      nextTraj.Reset();
-      nextTraj.SetGoalPosition(posf);
-      nextTraj.SetGoalVelocity(CommonMath::Vec3(0, 0, 0));
-      nextTraj.SetGoalAcceleration(CommonMath::Vec3(0, 0, 0));
-      nextTraj.Generate(_time(_gen));
+        initial_state.target_position = {posf.x, posf.y, posf.z};
+        // Calculate the trajectory in an offline manner (outside of the control loop)
+        ruckig::Result result = otg.calculate(initial_state, candidateTraj);
+      }
+      // Random sampling and prioritising average velocity in the goal direction (Lee et al.)
+      else if(_sampling_mode == 0)
+      {
+        double gen_depth = _depth(_gen);
+        _planner->DeprojectPixelToPoint(_pixelX(_gen), _pixelY(_gen),
+                                      gen_depth, posf);
+        initial_state.target_position = {posf.x, posf.y, posf.z};
+        // Calculate the trajectory in an offline manner (outside of the control loop)
+        ruckig::Result result = otg.calculate(initial_state, candidateTraj);
+      }
       return 0;
     }
+
     //! We pass this wrapper function to the planner (see FindLowestCostTrajectory), and this function calls the
     //! related GetNextCandidateTrajectory function to generate the next candidate trajectory. We structure the
     //! code this way so that other custom trajectory generators can be used in a similar fashion in the future.
-    static int GetNextCandidateTrajectoryWrapper(
-        void* ptr2obj,
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& nextTraj) {
-      RandomTrajectoryGenerator* obj = (RandomTrajectoryGenerator*) ptr2obj;
-      return obj->GetNextCandidateTrajectory(nextTraj);
+    static int get_next_time_optimal_trajectory_wrapper(
+      void* ptr2obj, ruckig::InputParameter<3>& initial_state,
+      ruckig::Trajectory<3>& nextTraj) {
+      RandomTrajectoryGenerator* obj = (RandomTrajectoryGenerator*)ptr2obj;
+      return obj->get_next_time_optimal_trajectory(initial_state, nextTraj);
     }
+
    private:
     //! [pixels]
     std::uniform_real_distribution<> _pixelX;
@@ -344,31 +362,39 @@ class DepthImagePlanner {
     std::uniform_real_distribution<> _time;
     std::random_device _rd;
     std::mt19937 _gen;
-    //! Pointer to DepthImagePlanner where camera intrinsics are defined
-    DepthImagePlanner* _planner;
+    //! Pointer to SteeringPlanner where camera intrinsics are defined
+    SteeringPlanner* _planner;
+    int8_t _sampling_mode;
   };
 
  private:
+  //! Scan the current depth image to decide which steering direction.
+  int scan_depth();
 
   //! Collision checking algorithm as described by Algorithm 1 in the RAPPIDS paper.
   //! The given trajectory will be checked for collisions, and new pyramids will be
   //! generated and added to the set of generated pyramids as needed.
   /*!
-   * @param trajectory Candidate trajectory to be checked for collisions. We assume the
+   * @param opt_trajectory Candidate trajectory to be checked for collisions. We assume the
    * candidate trajectory is written in the camera-fixed frame and has an initial
    * position of (0, 0, 0).
    * @return True if the trajectory is found to be collision free, false otherwise
    */
-  bool IsCollisionFree(CommonMath::Trajectory trajectory);
+  // bool IsCollisionFree(CommonMath::Trajectory trajectory);
+  bool is_segment_collision_free(CommonMath::SegmentThirdOrder segment);
 
   //! Splits the candidate trajectory into sections with monotonically changing depth
   //! using the methods described in Section II.B of the RAPPIDS paper.
   /*!
-   * @param trajectory The candidate trajectory to be split into its sections with monotonically changing depth
+   * @param opt_trajectory The candidate trajectory to be split into its sections with monotonically changing depth
    * @return A vector of sections of the trajectory with monotonically changing depth
    */
-  std::vector<MonotonicTrajectory> GetMonotonicSections(
-      CommonMath::Trajectory trajectory);
+  // std::vector<MonotonicTrajectory> GetMonotonicSections(
+  //     CommonMath::Trajectory trajectory);
+  std::vector<MonotonicSegment> get_monotonic_segments(
+    CommonMath::SegmentThirdOrder segment);
+  std::vector<CommonMath::SegmentThirdOrder> get_segments(
+    const ruckig::Trajectory<3> trajectory);
 
   //! Tries to find an existing pyramid that contains the given sample point
   /*!
@@ -391,7 +417,7 @@ class DepthImagePlanner {
    * the collision with the deepest depth occurs.
    * @return True if the trajectory collides with at least one lateral face of the pyramid
    */
-  bool FindDeepestCollisionTime(MonotonicTrajectory monoTraj, Pyramid pyramid,
+  bool FindDeepestCollisionTime(MonotonicSegment monoTraj, Pyramid pyramid,
                                 double& outCollisionTime);
 
   //! Attempts to generate a pyramid that contains a given point.
@@ -417,20 +443,23 @@ class DepthImagePlanner {
     //! the camera-fixed frame, the initial position of each candidate trajectory is always (0, 0, 0) because
     //! we fix the trajectories to originate at the focal point of the camera. Thus, we only need to evaluate
     //! the end point of the trajectory.
-    double GetCost(
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& traj) {
-      double duration = traj.GetFinalTime();
-      return -_explorationDirection.Dot(traj.GetPosition(duration)) / duration;
+    double get_cost(ruckig::Trajectory<3>& traj) {
+      double duration = traj.get_duration();
+      std::array<double, 3> endpoint_position;
+      traj.at_time(duration, endpoint_position);
+      CommonMath::Vec3 endpoint_unit_vector = CommonMath::Vec3(endpoint_position[0], endpoint_position[1], endpoint_position[2]).GetUnitVector();
+      return -_explorationDirection.Dot(endpoint_unit_vector);
     }
     //! We pass this wrapper function to the planner (see FindLowestCostTrajectory), and this function calls the
     //! related GetCost function to compute the cost of the given trajectory. We structure the code this way so
     //! that other custom cost functions can be used in a similar fashion in the future.
-    static double ExplorationDirectionCostWrapper(
+    static double direction_cost_wrapper(
         void* ptr2obj,
-        RapidQuadrocopterTrajectoryGenerator::RapidTrajectoryGenerator& traj) {
+        ruckig::Trajectory<3>& traj) {
       ExplorationCost* explorationCost = (ExplorationCost*) ptr2obj;
-      return explorationCost->GetCost(traj);
+      return explorationCost->get_cost(traj);
     }
+
    private:
     CommonMath::Vec3 _explorationDirection;
   };
@@ -494,6 +523,9 @@ class DepthImagePlanner {
 
   //! The list of all pyramids found by the planner. This list is ordered based on the depth of the base plane of each pyramid.
   std::vector<Pyramid> _pyramids;
+
+  //! The steering amount in degree
+  float _steering_amount;
 
 };
 }  // namespace RectangularPyramidPlanner

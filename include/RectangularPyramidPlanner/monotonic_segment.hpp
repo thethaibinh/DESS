@@ -18,9 +18,9 @@
  */
 
 #include "CommonMath/Vec3.hpp"
-#include "CommonMath/Trajectory.hpp"
+#include "CommonMath/segment.hpp"
 
-class MonotonicTrajectory : public CommonMath::Trajectory {
+class MonotonicSegment : public CommonMath::SegmentThirdOrder {
  public:
 
   //! Creates a trajectory with monotonically changing depth (i.e. position along the z-axis).
@@ -31,23 +31,23 @@ class MonotonicTrajectory : public CommonMath::Trajectory {
    * @param startTime Endpoint of the trajectory [seconds]
    * @param endTime Endpoint of the trajectory [seconds]
    */
-  MonotonicTrajectory(std::vector<CommonMath::Vec3> coeffs, double startTime,
+  MonotonicSegment(std::vector<CommonMath::Vec3> coeffs, double startTime,
                       double endTime)
-      : CommonMath::Trajectory(coeffs, startTime, endTime) {
-    double startVal = Trajectory::GetAxisValue(2, startTime);
-    double endVal = Trajectory::GetAxisValue(2, endTime);
+      : CommonMath::SegmentThirdOrder(coeffs, startTime, endTime) {
+    double startVal = CommonMath::SegmentThirdOrder::GetAxisValue(2, startTime);
+    double endVal = CommonMath::SegmentThirdOrder::GetAxisValue(2, endTime);
     increasingDepth = startVal < endVal;  // index 2 = z-value
   }
 
   //! We include this operator so that we can sort the monotonic sections based on the depth
   //! of their deepest point. The idea is that we should check the monotonic section with the
   //! deepest depth for collisions first, as it's the most likely to collide with the environment.
-  bool operator<(const MonotonicTrajectory& rhs) const {
+  bool operator<(const MonotonicSegment& rhs) const {
     double deepestDepth, rhsDeepestDepth;
     if (increasingDepth) {
-      deepestDepth = Trajectory::GetAxisValue(2, Trajectory::GetEndTime());
+      deepestDepth = CommonMath::SegmentThirdOrder::GetAxisValue(2, CommonMath::SegmentThirdOrder::GetEndTime());
     } else {
-      deepestDepth = Trajectory::GetAxisValue(2, Trajectory::GetStartTime());
+      deepestDepth = CommonMath::SegmentThirdOrder::GetAxisValue(2, CommonMath::SegmentThirdOrder::GetStartTime());
     }
     if (rhs.increasingDepth) {
       rhsDeepestDepth = rhs.GetAxisValue(2, rhs.GetEndTime());

@@ -22,13 +22,44 @@
  * Modified by Gaurav Jalan @HiPeRLab Berkeley
  * Added new root storing method
  * Discarded imaginary root finder part
- * Added new Quartic namespace
+ * Added new RootFinder namespace
  */
 
 #include <cmath>
-#include "Quartic/quartic.h"
+#include "RootFinder/quartic.h"
 
-namespace Quartic {
+namespace RootFinder {
+
+size_t solve_quadratic(const double& C, const double& B, const double& A,
+                       double roots[]) {
+  // Contingency: if A = 0, not a quadratic = linear
+  // initialise counters for real and imaginary roots
+  size_t rCnt = 0;
+  if (A == 0) {
+    // If B is zero then we have a NaN
+    if (B == 0) return false;
+
+    roots[rCnt] = -1.0 * C / B;
+    ++rCnt;
+    return rCnt;
+  }
+
+  double discriminant = (B * B) - (4 * A * C);
+
+  // Cannot do imaginary numbers, yet
+  if (discriminant < 0) return false;
+
+  // This avoids a cancellation of errors. See
+  // http://en.wikipedia.org/wiki/Quadratic_equation#Floating_point_implementation
+  double t = -0.5 * (B + ((B < 0) ? -1 : 1) * std::sqrt(discriminant));
+
+  roots[rCnt] = t / A;
+  ++rCnt;
+  roots[rCnt] = C / t;
+  ++rCnt;
+
+  return rCnt;
+}
 
 //---------------------------------------------------------------------------
 // solve cubic equation x^3 + a*x^2 + b*x + c
