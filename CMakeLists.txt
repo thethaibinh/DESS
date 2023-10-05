@@ -16,6 +16,11 @@ find_package(Boost COMPONENTS program_options REQUIRED)
 find_package(catkin REQUIRED COMPONENTS
 		pcl_ros
 		cv_bridge
+		position_controller
+		quadrotor_common
+		dodgelib
+		eigen_catkin
+		quadrotor_msgs
 		dodgeros_msgs)
 catkin_package(
 	CATKIN_DEPENDS
@@ -31,7 +36,6 @@ add_subdirectory(src)
 add_executable(main main.cpp)
 target_link_libraries(main
 					  dess
-					  RapidQuadcopterTrajectories
 					  RootFinder
 					  ruckig
 					  ${OpenCV_LIBS}

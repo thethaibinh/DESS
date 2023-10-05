@@ -18,7 +18,7 @@
  * along with the code.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "src/PlannerNode.cpp"
+#include "src/planner_node.cpp"
 
 int main(int argc, char **argv) {
   ros::init(argc, argv, "planner");

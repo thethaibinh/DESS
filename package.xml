@@ -22,6 +22,7 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>visualization_msgs</depend>
   <depend>opencv2</depend>
   <depend>cv_bridge</depend>
@@ -29,5 +30,10 @@
   <depend>message_generation</depend>
   <depend>pcl_conversions</depend>
   <depend>pcl_ros</depend>
+  <depend>position_controller</depend>
+  <depend>quadrotor_common</depend>
+  <depend>dodgelib</depend>
+  <depend>eigen_catkin</depend>
+  <depend>quadrotor_msgs</depend>
 
 </package>

@@ -1,3 +1,2 @@
-add_library(dess steering_planner.cpp PlannerNode.cpp)
-add_library(RapidQuadcopterTrajectories RapidTrajectoryGenerator.cpp SingleAxisTrajectory.cpp)
+add_library(dess steering_planner.cpp planner_node.cpp)
 add_library(RootFinder quartic.cpp)

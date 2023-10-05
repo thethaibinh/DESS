@@ -21,7 +21,6 @@
 
 using namespace std::chrono;
 using namespace CommonMath;
-using namespace RapidQuadrocopterTrajectoryGenerator;
 using namespace RectangularPyramidPlanner;
 
 SteeringPlanner::SteeringPlanner(cv::Mat depthImage, double depthScale,
@@ -59,7 +58,6 @@ bool SteeringPlanner::FindFastestTrajRandomCandidates(
     int8_t sampling_mode,
     ruckig::InputParameter<3>& initial_state,
     ruckig::Trajectory<3>& opt_trajectory,
-    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime, CommonMath::Vec3 explorationDirection) {
 
   ExplorationCost explorationCost(explorationDirection);
@@ -75,7 +73,6 @@ bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
     int8_t sampling_mode,
     ruckig::InputParameter<3>& initial_state,
     ruckig::Trajectory<3>& opt_trajectory,
-    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime,
     void* costFunctionDefinitionObject,
     double (*costFunctionWrapper)(
@@ -94,7 +91,6 @@ bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
 bool SteeringPlanner::FindLowestCostTrajectory(
     ruckig::InputParameter<3>& initial_state,
     ruckig::Trajectory<3>& opt_trajectory,
-    // RapidQuadrocopterTrajectoryGenerator::SteeringTrajectoryGenerator& trajectory,
     double allocatedComputationTime,
     void* costFunctionDefinitionObject,
     double (*costFunctionWrapper)(

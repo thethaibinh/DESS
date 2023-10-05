@@ -28,7 +28,6 @@
 #include "CommonMath/Vec3.hpp"
 #include "CommonMath/segment.hpp"
 #include "RootFinder/quartic.h"
-#include "RapidQuadcopterTrajectories/SteeringTrajectoryGenerator.hpp"
 #include "RectangularPyramidPlanner/Pyramid.hpp"
 #include "RectangularPyramidPlanner/monotonic_segment.hpp"
 
@@ -380,7 +379,6 @@ class SteeringPlanner {
    * position of (0, 0, 0).
    * @return True if the trajectory is found to be collision free, false otherwise
    */
-  // bool IsCollisionFree(CommonMath::Trajectory trajectory);
   bool is_segment_collision_free(CommonMath::SegmentThirdOrder segment);
 
   //! Splits the candidate trajectory into sections with monotonically changing depth
@@ -389,8 +387,6 @@ class SteeringPlanner {
    * @param opt_trajectory The candidate trajectory to be split into its sections with monotonically changing depth
    * @return A vector of sections of the trajectory with monotonically changing depth
    */
-  // std::vector<MonotonicTrajectory> GetMonotonicSections(
-  //     CommonMath::Trajectory trajectory);
   std::vector<MonotonicSegment> get_monotonic_segments(
     CommonMath::SegmentThirdOrder segment);
   std::vector<CommonMath::SegmentThirdOrder> get_segments(
