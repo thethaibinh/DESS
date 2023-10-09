@@ -87,6 +87,8 @@ class PlannerNode {
  public:
   PlannerNode();  // Constructor
   void sampling_mode_callback(const std_msgs::Int8::ConstPtr& msg);
+  void start_callback(const std_msgs::Empty::ConstPtr& msg);
+  void reset_callback(const std_msgs::Empty::ConstPtr& msg);
   void state_callback(const dodgeros_msgs::QuadState& state);
   void msgCallback(const sensor_msgs::ImageConstPtr& depth_msg);
 
@@ -99,7 +101,7 @@ class PlannerNode {
   ros::NodeHandle pnh_;
   ros::Publisher trajectoty_pub, point_cloud_pub, visual_pub,
     control_command_pub_;
-  ros::Subscriber sampling_mode_sub, image_sub, state_sub;
+  ros::Subscriber reset_sub, start_sub, sampling_mode_sub, image_sub, state_sub;
   dodgeros_msgs::QuadState _state;
   bool steering_sent;
   int8_t sampling_mode;
@@ -123,7 +125,6 @@ class PlannerNode {
   // Trajectory execution variables
   std::list<ruckig::Trajectory<3>> trajectory_queue_;
   ros::Time time_start_trajectory_execution_, last_tracking_loop;
-  bool new_trajectory_generated;
 
   // position controller functions
   quadrotor_common::QuadStateEstimate quad_common_state_from_dodgedrone_state(
@@ -144,6 +145,9 @@ class PlannerNode {
 
   // Constants
   static constexpr double kPositionJumpTolerance_ = 0.5;
+  double goal_x_world_coordinate;  // [meters]
+  double goal_y_world_coordinate;  // [meters]
+  double goal_z_world_coordinate;  // [meters]
 };
 
 #endif  // PLANNER_NODE_HPP

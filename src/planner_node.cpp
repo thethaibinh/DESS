@@ -10,8 +10,7 @@ PlannerNode::PlannerNode()
     last_generated_time(0),
     first_time_in_new_state_(true),
     trajectory_queue_(),
-    new_trajectory_generated(false),
-    autopilot_state_(States::START) {
+    autopilot_state_(States::OFF) {
   // Publishers
   control_command_pub_ =
     n_.advertise<dodgeros_msgs::Command>("/kingfisher/dodgeros_pilot/feedthrough_command", 1);
@@ -22,7 +21,11 @@ PlannerNode::PlannerNode()
                            &PlannerNode::msgCallback, this);
   sampling_mode_sub = n_.subscribe("/sampling_mode", 1,
                                    &PlannerNode::sampling_mode_callback, this);
-  state_sub = pnh_.subscribe("/kingfisher/dodgeros_pilot/state", 1,
+  start_sub = n_.subscribe("/kingfisher/start_navigation", 1,
+                                   &PlannerNode::start_callback, this);
+  reset_sub = n_.subscribe("/kingfisher/dodgeros_pilot/reset_sim", 1,
+                             &PlannerNode::reset_callback, this);
+  state_sub = n_.subscribe("/kingfisher/dodgeros_pilot/state", 1,
                              &PlannerNode::state_callback, this);
   if (!loadParameters()) {
     ROS_ERROR("[%s] Could not load parameters.", pnh_.getNamespace().c_str());
@@ -33,6 +36,18 @@ PlannerNode::PlannerNode()
 
 void PlannerNode::sampling_mode_callback(const std_msgs::Int8::ConstPtr& msg) {
   sampling_mode = msg->data;
+}
+
+void PlannerNode::start_callback(const std_msgs::Empty::ConstPtr& msg) {
+  ROS_WARN("[%s] Planner: Start publishing commands!",
+           pnh_.getNamespace().c_str());
+  setAutoPilotStateForced(States::START);
+}
+
+void PlannerNode::reset_callback(const std_msgs::Empty::ConstPtr& msg) {
+  ROS_WARN("[%s] Planner: Reset quadrotor simulator!",
+           pnh_.getNamespace().c_str());
+  setAutoPilotStateForced(States::OFF);
 }
 
 void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
@@ -56,8 +71,24 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   }
 
   // Update autopilot state
+  geometry_msgs::Point goal_in_world_frame;
+  goal_in_world_frame.x = goal_x_world_coordinate;
+  goal_in_world_frame.y = goal_y_world_coordinate;
+  goal_in_world_frame.z = goal_z_world_coordinate;
+
+  double distance_to_goal =
+    (quadrotor_common::geometryToEigen(_state.pose.position) -
+     quadrotor_common::geometryToEigen(goal_in_world_frame))
+      .norm();
+
   if (_state.pose.position.z > 4.8 && autopilot_state_ == States::START) {
-    autopilot_state_ = States::TRAJECTORY_CONTROL;
+    setAutoPilotStateForced(States::TRAJECTORY_CONTROL);
+  }
+  // Stop planning when the goal is less than 1.5m close.
+  else if (autopilot_state_ == States::TRAJECTORY_CONTROL &&
+           (distance_to_goal < 3 ||
+            _state.pose.position.x > goal_x_world_coordinate)) {
+    setAutoPilotStateForced(States::GO_TO_GOAL);
   }
 
   // tracking trajectory
@@ -75,9 +106,7 @@ void PlannerNode::track_trajectory() {
 
   if (autopilot_state_ == States::START) {
     reference_point.position = Eigen::Vector3d(0.0, 0.0, 5.0);
-  }
-  else if (autopilot_state_ == States::TRAJECTORY_CONTROL)
-  {
+  } else if (autopilot_state_ == States::TRAJECTORY_CONTROL) {
     ros::Duration trajectory_point_time =
       command_execution_time - time_start_trajectory_execution_;
     double point_time = trajectory_point_time.toSec();
@@ -85,14 +114,20 @@ void PlannerNode::track_trajectory() {
     point_time =
       (point_time > trajectory_duration) ? trajectory_duration : point_time;
 
-    // get_reference_point_at_time(reference_trajectory_, point_time, reference_point);
-    get_reference_point_at_time(reference_trajectory_, trajectory_duration, reference_point);
-    // reference_point.position = Eigen::Vector3d(5.0, 0.0, 5.0);
+    // get_reference_point_at_time(reference_trajectory_, point_time,
+    //                             reference_point);
+    get_reference_point_at_time(reference_trajectory_, trajectory_duration,
+                                reference_point);
+  } else if (autopilot_state_ == States::GO_TO_GOAL) {
+    reference_point.position =
+      Eigen::Vector3d(goal_x_world_coordinate, goal_y_world_coordinate,
+                      goal_z_world_coordinate);
   }
 
   command = track_trajectory_point(reference_point);
 
-  if (autopilot_state_ != States::COMMAND_FEEDTHROUGH) {
+  if (autopilot_state_ != States::COMMAND_FEEDTHROUGH &&
+      autopilot_state_ != States::OFF) {
     command.timestamp = wall_time_now;
     command.expected_execution_time = command_execution_time;
     command.control_mode = quadrotor_common::ControlMode::BODY_RATES;
@@ -247,7 +282,7 @@ bool PlannerNode::check_valid_trajectory(
                       .norm();
   if (pos_diff > kPositionJumpTolerance_) {
     ROS_WARN(
-      "[%s] First received trajectory segment does not start at current "
+      "[%s] The received trajectory does not start at current "
       "position, will ignore trajectory",
       pnh_.getNamespace().c_str());
     return false;
@@ -323,9 +358,9 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
   geometry_msgs::PointStamped goal_in_camera_frame, goal_in_world_frame;
   goal_in_world_frame.header.frame_id = world_frame;
   goal_in_world_frame.header.stamp = ros::Time::now();
-  goal_in_world_frame.point.x = 18;
-  goal_in_world_frame.point.y = 0;
-  goal_in_world_frame.point.z = 5;
+  goal_in_world_frame.point.x = goal_x_world_coordinate;
+  goal_in_world_frame.point.y = goal_y_world_coordinate;
+  goal_in_world_frame.point.z = goal_z_world_coordinate;
   try {
     tf2::doTransform(goal_in_world_frame, goal_in_camera_frame,
                      transform_to_camera);
@@ -338,23 +373,7 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
                           -goal_in_camera_frame.point.z,
                           goal_in_camera_frame.point.x);
 
-  // Stop planning when the goal is less than 1.5m close.
-  if (exploration_vector.GetNorm2() < 2) {
-    // Publish generated trajectory
-    geometry_msgs::Pose trajectory_msg;
-    trajectory_msg.position.x = goal_in_world_frame.point.x;
-    trajectory_msg.position.y = goal_in_world_frame.point.y;
-    trajectory_msg.position.z = goal_in_world_frame.point.z;
-    trajectory_msg.orientation.w = 1;
-    // orientation.x = 0 means we are sending conventional trajectories
-    // orientation.z = 0 means the steering value = 0
-    trajectory_msg.orientation.x = 0;
-    trajectory_msg.orientation.z = 0;
-    trajectoty_pub.publish(trajectory_msg);
-    steering_sent = false;
-    last_generated_time = depth_msg->header.stamp.toSec();
-    return;
-  }
+
   ruckig::Trajectory<3> opt_traj;
   // Find the fastest trajectory candidate
   if (!planner.FindFastestTrajRandomCandidates(
@@ -365,35 +384,6 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
         steering_sent) {
       return;
     }
-    // Publish generated trajectory
-    geometry_msgs::Pose trajectory_msg;
-    geometry_msgs::Point traj_in_world_frame, traj_in_camera_frame;
-
-    // Build traj_in_camera_frame from fastest trajectory found (traj)
-    // and transforming it into traj_in_world_frame
-    std::array<double, 3> endpoint_position;
-    opt_traj.at_time(opt_traj.get_duration(), endpoint_position);
-    traj_in_camera_frame.x = endpoint_position[2];
-    traj_in_camera_frame.y = -endpoint_position[0];
-    traj_in_camera_frame.z = -endpoint_position[1];
-    try {
-      tf2::doTransform(traj_in_camera_frame, traj_in_world_frame,
-                       transform_to_world);
-    } catch (tf2::TransformException& ex) {
-      ROS_WARN("Failure %s\n", ex.what());  // Print exception which was
-                                            // caught
-    }
-    // Building ROS trajectory_msg from transformed traj_in_world_frame
-    trajectory_msg.position.x = traj_in_world_frame.x;
-    trajectory_msg.position.y = traj_in_world_frame.y;
-    trajectory_msg.position.z = traj_in_world_frame.z;
-    // For convenience purposes, orientation.x = 1 means we are sending
-    // steering commands we use orientation.z for steering value
-    trajectory_msg.orientation.w = 1;
-    trajectory_msg.orientation.x = 1;
-    trajectory_msg.orientation.z = planner.get_steering();
-    trajectoty_pub.publish(trajectory_msg);
-    steering_sent = true;
     return;
   }
 
@@ -401,39 +391,90 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
   opt_traj.assign_body_to_world_transform(transform_to_world);
   opt_traj.assign_world_to_body_transform(transform_to_camera);
   trajectory_queue_.push_back(opt_traj);
-  new_trajectory_generated = true;
+  // TODO:
+  // if last_cost
+  // last_cost =
 
-  // Publish generated trajectory
-  geometry_msgs::Pose trajectory_msg;
-  geometry_msgs::PointStamped traj_in_world_frame, traj_in_camera_frame;
-  traj_in_camera_frame.header.frame_id = camera_frame;
-  traj_in_camera_frame.header.stamp = ros::Time::now();
-  // double duration = opt_traj.get_duration();
-  std::array<double, 3> endpoint_position;
-  opt_traj.at_time(opt_traj.get_duration(), endpoint_position);
-  traj_in_camera_frame.point.x = endpoint_position[2];
-  traj_in_camera_frame.point.y = -endpoint_position[0];
-  traj_in_camera_frame.point.z = -endpoint_position[1];
-  try {
-    tf2::doTransform(traj_in_camera_frame, traj_in_world_frame,
-                     transform_to_world);
-  } catch (tf2::TransformException& ex) {
-    ROS_WARN("Failure %s\n", ex.what());  // Print exception which was caught
+  // Visualisation
+  // parameters for visualization
+  visualization_msgs::Marker pyramids_bases, pyramids_edges,
+    polynomial_trajectory;
+  pyramids_bases.header.frame_id = pyramids_edges.header.frame_id =
+    polynomial_trajectory.header.frame_id = "camera";
+  pyramids_bases.header.stamp = pyramids_edges.header.stamp =
+    polynomial_trajectory.header.stamp = ros::Time::now();
+  pyramids_bases.ns = pyramids_edges.ns = polynomial_trajectory.ns =
+    "visualization";
+  pyramids_bases.action = pyramids_edges.action = polynomial_trajectory.action =
+    visualization_msgs::Marker::ADD;
+  pyramids_bases.pose.orientation.w = pyramids_edges.pose.orientation.w =
+    polynomial_trajectory.pose.orientation.w = 1.0;
+  pyramids_bases.id = 1;
+  pyramids_edges.id = 2;
+  polynomial_trajectory.id = 3;
+  pyramids_bases.type = visualization_msgs::Marker::LINE_STRIP;
+  pyramids_edges.type = visualization_msgs::Marker::LINE_LIST;
+  polynomial_trajectory.type = visualization_msgs::Marker::LINE_STRIP;
+  // LINE_STRIP markers use only the x component of scale, for the line width
+  pyramids_bases.scale.x = pyramids_edges.scale.x =
+    polynomial_trajectory.scale.x = 0.02;
+  // Line strip is blue
+  pyramids_bases.color.g = pyramids_edges.color.g = 1.0;
+  polynomial_trajectory.color.b = 1.0;
+  pyramids_bases.color.a = pyramids_edges.color.a =
+    polynomial_trajectory.color.a = 1.0;
+  geometry_msgs::Point p;
+
+  double trajectory_duration = opt_traj.get_duration();
+  std::array<double, 3> trajectory_point_position;
+  for (int i = 0; i <= 100; i++) {
+    opt_traj.at_time(trajectory_duration * i / 100, trajectory_point_position);
+    p.x = trajectory_point_position[2];
+    p.y = -trajectory_point_position[0];
+    p.z = -trajectory_point_position[1];
+    polynomial_trajectory.points.push_back(p);
   }
-  trajectory_msg.position.x = traj_in_world_frame.point.x;
-  trajectory_msg.position.y = traj_in_world_frame.point.y;
-  trajectory_msg.position.z = traj_in_world_frame.point.z;
-  trajectory_msg.orientation.w = 1;
-  // orientation.x = 0 means we are sending conventional trajectories
-  // orientation.z = 0 means the steering value = 0
-  trajectory_msg.orientation.x = 0;
-  trajectory_msg.orientation.z = 0;
-  trajectoty_pub.publish(trajectory_msg);
-  steering_sent = false;
-  last_generated_time = depth_msg->header.stamp.toSec();
+  visual_pub.publish(polynomial_trajectory);
+
+  // Publish pyramids
+  std::vector<Pyramid> pyramids = planner.GetPyramids();
+  if (pyramids.empty()) {
+    return;
+  }
+  for (std::vector<Pyramid>::iterator it = pyramids.begin();
+       it != pyramids.end(); ++it) {
+    for (size_t i = 0; i < 4; i++) {
+      p.x = p.y = p.z = 0;
+      pyramids_edges.points.push_back(p);
+      p.x = (*it)._corners[i].z;
+      p.y = -(*it)._corners[i].x;
+      p.z = -(*it)._corners[i].y;
+      pyramids_bases.points.push_back(p);
+      pyramids_edges.points.push_back(p);
+    }
+    // close the rectangle base
+    p.x = (*it)._corners[0].z;
+    p.y = -(*it)._corners[0].x;
+    p.z = -(*it)._corners[0].y;
+    pyramids_bases.points.push_back(p);
+  }
+  // visual_pub.publish(pyramids_bases);
+  // visual_pub.publish(pyramids_edges);
 }
 
 bool PlannerNode::loadParameters() {
+  if (!quadrotor_common::getParam("goal_x_world_coordinate",
+                                  goal_x_world_coordinate, pnh_)) {
+    return false;
+  }
+  if (!quadrotor_common::getParam("goal_y_world_coordinate",
+                                  goal_y_world_coordinate, pnh_)) {
+    return false;
+  }
+  if (!quadrotor_common::getParam("goal_z_world_coordinate",
+                                  goal_z_world_coordinate, pnh_)) {
+    return false;
+  }
   if (!base_controller_params_.loadParameters(pnh_)) {
     return false;
   }

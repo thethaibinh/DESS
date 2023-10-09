@@ -66,7 +66,8 @@ bool SteeringPlanner::FindFastestTrajRandomCandidates(
       initial_state,
       opt_trajectory,
       allocatedComputationTime, &explorationCost,
-      &ExplorationCost::direction_cost_wrapper);
+      // &ExplorationCost::direction_cost_wrapper);
+      &ExplorationCost::distance_cost_wrapper);
 }
 
 bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
@@ -77,7 +78,7 @@ bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
     void* costFunctionDefinitionObject,
     double (*costFunctionWrapper)(
         void* costFunctionDefinitionObject,
-        ruckig::Trajectory<3>&)) {
+        CommonMath::Vec3& endpoint_vector)) {
 
   RandomTrajectoryGenerator trajGenObj(this, sampling_mode);
   return FindLowestCostTrajectory(
@@ -89,56 +90,60 @@ bool SteeringPlanner::FindLowestCostTrajectoryRandomCandidates(
 }
 
 bool SteeringPlanner::FindLowestCostTrajectory(
-    ruckig::InputParameter<3>& initial_state,
-    ruckig::Trajectory<3>& opt_trajectory,
-    double allocatedComputationTime,
-    void* costFunctionDefinitionObject,
-    double (*costFunctionWrapper)(
-        void* costFunctionDefinitionObject,
-        ruckig::Trajectory<3>&),
-    void* trajectoryGeneratorObject,
-    int (*trajectoryGeneratorWrapper)(
-        void* trajectoryGeneratorObject,
-        ruckig::InputParameter<3>& initial_state,
-        ruckig::Trajectory<3>& nextTraj)) {
-
+  ruckig::InputParameter<3>& initial_state,
+  ruckig::Trajectory<3>& opt_trajectory, double allocatedComputationTime,
+  void* costFunctionDefinitionObject,
+  double (*costFunctionWrapper)(void* costFunctionDefinitionObject,
+                                CommonMath::Vec3& endpoint_position),
+  void* trajectoryGeneratorObject,
+  int (*trajectoryGeneratorWrapper)(void* trajectoryGeneratorObject,
+                                    CommonMath::Vec3& endpoint_position)) {
   // Start timing the planner
   _startTime = high_resolution_clock::now();
   _allocatedComputationTime = allocatedComputationTime;
-
+  ruckig::Ruckig<3> otg;
   bool feasibleTrajFound = false;
   double bestCost = std::numeric_limits<double>::max();
 
   while (true) {
-
     if (duration_cast<microseconds>(high_resolution_clock::now() - _startTime)
-        .count() > int(_allocatedComputationTime * 1e6)) {
+          .count() > int(_allocatedComputationTime * 1e6)) {
       break;
     }
 
-    // Get the next candidate trajectory to evaluate using the provided trajectory generator
-    ruckig::Trajectory<3> candidateTraj;
+    // Get the next candidate trajectory to evaluate using the provided
+    // trajectory generator
+    CommonMath::Vec3 sampled_endpoint_position;
     int returnVal = (*trajectoryGeneratorWrapper)(trajectoryGeneratorObject,
-                                                  initial_state, candidateTraj);
+                                                  sampled_endpoint_position);
     if (returnVal < 0) {
-      // There are no more candidate trajectories to check. This case should only be reached if
-      // the candidate trajectory generator is designed to only give a finite number of candidates
-      // (e.g. when using a gridded approach instead of using random search)
+      // There are no more candidate trajectories to check. This case should
+      // only be reached if the candidate trajectory generator is designed to
+      // only give a finite number of candidates (e.g. when using a gridded
+      // approach instead of using random search)
       break;
     }
     _numTrajectoriesGenerated++;
 
     // Compute the cost of the trajectory using the provided cost function
-    double cost = (*costFunctionWrapper)(costFunctionDefinitionObject, candidateTraj);
+    double cost = (*costFunctionWrapper)(costFunctionDefinitionObject,
+                                         sampled_endpoint_position);
     if (cost < bestCost) {
       // The trajectory is a lower cost than lowest cost trajectory found so far
       // Check whether the trajectory collides with obstacles
-      // bool isCollisionFree = IsCollisionFree(candidateTraj.GetTrajectory());
-      // First split trajectory into possible 7 segment as described in the profile then check every one of them.
+      // First split trajectory into possible 7 segment as described in the
+      // profile then check every one of them.
+      initial_state.target_position = {sampled_endpoint_position.x,
+                                       sampled_endpoint_position.y,
+                                       sampled_endpoint_position.z};
+      ruckig::Trajectory<3> candidateTraj;
+      // ruckig::Ruckig<3> otg;
+      // Calculate the trajectory in an offline manner (outside of the control loop)
+      ruckig::Result result = otg.calculate(initial_state, candidateTraj);
+
       std::vector<SegmentThirdOrder> segments = get_segments(candidateTraj);
       bool isCollisionFree = true;
-      for (size_t i = 0; i < segments.size(); i++)
-      {
+      for (size_t i = 0; i < segments.size(); i++) {
         isCollisionFree &= is_segment_collision_free(segments[i]);
       }
       _numCollisionChecks++;
