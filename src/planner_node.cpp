@@ -61,8 +61,14 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   while (trajectory_queue_.size() > 1) {
     trajectory_queue_.pop_front();
   }
+  ros::Time wall_time_now = ros::Time::now();
+  ros::Duration trajectory_point_time =
+    wall_time_now - time_start_trajectory_execution_;
+  double point_time = trajectory_point_time.toSec();
   if (trajectory_queue_.size()) {
-    if (check_valid_trajectory(_state, trajectory_queue_.front())) {
+    if (check_valid_trajectory(_state, trajectory_queue_.front()) &&
+        // autopilot_state_ == States::START) {
+        point_time > 0.7) {
       reference_trajectory_ = trajectory_queue_.front();
       // marking trajectory execution starting time
       time_start_trajectory_execution_ = ros::Time::now();
@@ -114,9 +120,7 @@ void PlannerNode::track_trajectory() {
     point_time =
       (point_time > trajectory_duration) ? trajectory_duration : point_time;
 
-    // get_reference_point_at_time(reference_trajectory_, point_time,
-    //                             reference_point);
-    get_reference_point_at_time(reference_trajectory_, trajectory_duration,
+    get_reference_point_at_time(reference_trajectory_, point_time,
                                 reference_point);
   } else if (autopilot_state_ == States::GO_TO_GOAL) {
     reference_point.position =
@@ -349,7 +353,7 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
                                     acceleration_world_frame.x};
   initial_state.target_velocity = {0.0, 0.0, 0.0};
   initial_state.target_acceleration = {0.0, 0.0, 0.0};
-  initial_state.max_velocity = {3.0, 3.0, 3.0};
+  initial_state.max_velocity = {2.0, 2.0, 2.0};
   initial_state.max_acceleration = {5.0, 5.0, 5.0};
   initial_state.max_jerk = {15.0, 15.0, 15.0};
 
@@ -434,6 +438,7 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
     p.z = -trajectory_point_position[1];
     polynomial_trajectory.points.push_back(p);
   }
+  // if (autopilot_state_ == States::START)
   visual_pub.publish(polynomial_trajectory);
 
   // Publish pyramids
