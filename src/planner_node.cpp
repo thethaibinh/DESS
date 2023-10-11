@@ -5,9 +5,8 @@ PlannerNode::PlannerNode()
     to_camera_tf2(to_camera_buffer),
     camera_frame("camera"),
     world_frame("world"),
-    steering_sent(false),
+    steering_value(0.0),
     sampling_mode(0),
-    last_generated_time(0),
     first_time_in_new_state_(true),
     trajectory_queue_(),
     autopilot_state_(States::OFF) {
@@ -48,6 +47,7 @@ void PlannerNode::reset_callback(const std_msgs::Empty::ConstPtr& msg) {
   ROS_WARN("[%s] Planner: Reset quadrotor simulator!",
            pnh_.getNamespace().c_str());
   setAutoPilotStateForced(States::OFF);
+  steering_value = 0.0f;
 }
 
 void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
@@ -63,15 +63,17 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   }
   ros::Time wall_time_now = ros::Time::now();
   ros::Duration trajectory_point_time =
-    wall_time_now - time_start_trajectory_execution_;
+    wall_time_now - time_start_trajectory_execution;
   double point_time = trajectory_point_time.toSec();
   if (trajectory_queue_.size()) {
     if (check_valid_trajectory(_state, trajectory_queue_.front()) &&
         // autopilot_state_ == States::START) {
-        point_time > 0.7) {
+        point_time > 1.2f) {
       reference_trajectory_ = trajectory_queue_.front();
+      // ROS_WARN("[%s] Duration %f", pnh_.getNamespace().c_str(),
+      //          reference_trajectory_.get_duration());
       // marking trajectory execution starting time
-      time_start_trajectory_execution_ = ros::Time::now();
+      time_start_trajectory_execution = ros::Time::now();
     }
     trajectory_queue_.pop_front();
   }
@@ -111,10 +113,12 @@ void PlannerNode::track_trajectory() {
   quadrotor_common::ControlCommand command;
 
   if (autopilot_state_ == States::START) {
+    last_feasible_planning_time = command_execution_time;
+    steering_value = 0.0f;
     reference_point.position = Eigen::Vector3d(0.0, 0.0, 5.0);
   } else if (autopilot_state_ == States::TRAJECTORY_CONTROL) {
     ros::Duration trajectory_point_time =
-      command_execution_time - time_start_trajectory_execution_;
+      command_execution_time - time_start_trajectory_execution;
     double point_time = trajectory_point_time.toSec();
     double trajectory_duration = reference_trajectory_.get_duration();
     point_time =
@@ -123,6 +127,8 @@ void PlannerNode::track_trajectory() {
     get_reference_point_at_time(reference_trajectory_, point_time,
                                 reference_point);
   } else if (autopilot_state_ == States::GO_TO_GOAL) {
+    last_feasible_planning_time = command_execution_time;
+    steering_value = 0.0f;
     reference_point.position =
       Eigen::Vector3d(goal_x_world_coordinate, goal_y_world_coordinate,
                       goal_z_world_coordinate);
@@ -185,6 +191,20 @@ void PlannerNode::get_reference_point_at_time(
     ROS_WARN("Failure %s\n", ex.what());  // Print exception which was
                                           // caught
   }
+
+  // Asigning heading
+  Eigen::Vector3d trajectory_vector =
+    quadrotor_common::geometryToEigen(
+      reference_trajectory.get_terminal_position_in_world_frame()) -
+    quadrotor_common::geometryToEigen(
+      reference_trajectory.get_initial_position_in_world_frame());
+  double terminal_heading = atan2f(trajectory_vector[1], trajectory_vector[0]);
+  reference_point.heading = terminal_heading;
+  Eigen::Vector3d current_euler_angles =
+    quadrotor_common::quaternionToEulerAnglesZYX(
+      quadrotor_common::geometryToEigen(_state.pose.orientation));
+  if (fabs(steering_value) > 1e-6)
+    reference_point.heading = current_euler_angles(2) + steering_value;
 
   // Asigning to trajectory reference point
   reference_point.position =
@@ -353,9 +373,9 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
                                     acceleration_world_frame.x};
   initial_state.target_velocity = {0.0, 0.0, 0.0};
   initial_state.target_acceleration = {0.0, 0.0, 0.0};
-  initial_state.max_velocity = {2.0, 2.0, 2.0};
-  initial_state.max_acceleration = {5.0, 5.0, 5.0};
-  initial_state.max_jerk = {15.0, 15.0, 15.0};
+  initial_state.max_velocity = {5.0, 5.0, 3.0};
+  initial_state.max_acceleration = {7.0, 7.0, 5.0};
+  initial_state.max_jerk = {20.0, 20.0, 15.0};
 
   // Transform the coordinate of goal_in_world_frame to
   // the coordinate of goal_in_camera_frame
@@ -384,17 +404,23 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
         sampling_mode, initial_state, opt_traj, 0.02, exploration_vector)) {
     // We only sent steering commands when we could not find
     // any feasible trajectory for 1 second in a row.
-    if (((depth_msg->header.stamp.toSec() - last_generated_time) < 1) ||
-        steering_sent) {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    if (ros::Duration(ros::Time::now() - last_feasible_planning_time).toSec() < 0.2) {
+      steering_value = planner.get_steering() / 8;
       return;
     }
     return;
   }
 
   // New traj generated
-  opt_traj.assign_body_to_world_transform(transform_to_world);
-  opt_traj.assign_world_to_body_transform(transform_to_camera);
-  trajectory_queue_.push_back(opt_traj);
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    steering_value = 0.0f;
+    opt_traj.assign_body_to_world_transform(transform_to_world);
+    opt_traj.assign_world_to_body_transform(transform_to_camera);
+    trajectory_queue_.push_back(opt_traj);
+    last_feasible_planning_time = ros::Time::now();
+  }
   // TODO:
   // if last_cost
   // last_cost =

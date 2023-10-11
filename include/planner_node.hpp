@@ -59,6 +59,7 @@
 #include <quadrotor_common/trajectory.h>
 #include <quadrotor_common/trajectory_point.h>
 #include <quadrotor_common/geometry_eigen_conversions.h>
+#include <quadrotor_common/math_common.h>
 
 // Ruckig
 #include <ruckig/ruckig.hpp>
@@ -103,9 +104,8 @@ class PlannerNode {
     control_command_pub_;
   ros::Subscriber reset_sub, start_sub, sampling_mode_sub, image_sub, state_sub;
   dodgeros_msgs::QuadState _state;
-  bool steering_sent;
+  double steering_value;
   int8_t sampling_mode;
-  double last_generated_time;
   std::mutex state_mutex_;
 
   // Autopilot
@@ -124,7 +124,7 @@ class PlannerNode {
 
   // Trajectory execution variables
   std::list<ruckig::Trajectory<3>> trajectory_queue_;
-  ros::Time time_start_trajectory_execution_, last_tracking_loop;
+  ros::Time time_start_trajectory_execution, last_tracking_loop, last_feasible_planning_time;
 
   // position controller functions
   quadrotor_common::QuadStateEstimate quad_common_state_from_dodgedrone_state(

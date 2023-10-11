@@ -49,7 +49,7 @@ SteeringPlanner::SteeringPlanner(cv::Mat depthImage, double depthScale,
       _numTrajectoriesGenerated(0),
       _numCollisionChecks(0),
       _pyramidSearchPixelBuffer(2),  // A sample point must be more than 2 pixels away from the edge of a pyramid to use that pyramid for collision checking
-      _steering_amount(0)
+      steering_direction(0)
 {
   _depthData = reinterpret_cast<const uint16_t*>(depthImage.data);
 }
@@ -158,7 +158,7 @@ bool SteeringPlanner::FindLowestCostTrajectory(
   if (feasibleTrajFound) {
     return true;
   } else {
-    _steering_amount = scan_depth();
+    steering_direction = scan_depth();
     return false;
   }
 }

@@ -36,8 +36,8 @@
 #include <ruckig/ruckig.hpp>
 #include <ruckig/profile.hpp>
 
-#define DEPTH_UPPER_BOUND 3.0
-#define DEPTH_LOWER_BOUND 1.0
+#define DEPTH_UPPER_BOUND 5.0
+#define DEPTH_LOWER_BOUND 2.0
 
 namespace RectangularPyramidPlanner {
 
@@ -140,7 +140,7 @@ class SteeringPlanner {
    * @return the steering amount
    */
   float get_steering() {
-    return _steering_amount;
+    return steering_direction;
   }
 
   /*!
@@ -254,15 +254,13 @@ class SteeringPlanner {
      * We include this pointer so that we can call the DeprojectPixelToPoint function defined by the
      * SteeringPlanner object which uses the associated camera intrinsics.
      */
-    RandomTrajectoryGenerator(SteeringPlanner *planner, int8_t sampling_mode)
-        : _pixelX(0, planner->GetImageWidth()),
-          _pixelY(0, planner->GetImageHeight()),
-          _depth(1.0, 3),
-          _time(2, 3),
-          _gen(_rd()),
-          _planner(planner),
-          _sampling_mode(sampling_mode) {
-    }
+    RandomTrajectoryGenerator(SteeringPlanner* planner, int8_t sampling_mode)
+      : _pixelX(0, planner->GetImageWidth()),
+        _pixelY(0, planner->GetImageHeight()),
+        _depth(DEPTH_LOWER_BOUND, DEPTH_UPPER_BOUND),
+        _gen(_rd()),
+        _planner(planner),
+        _sampling_mode(sampling_mode) {}
     //! Constructor allowing for custom bounds on the sampling distributions used to generate the trajectories.
     /*!
      * @param minXpix Should be between zero and maxXpix [units of pixels]
@@ -284,7 +282,6 @@ class SteeringPlanner {
       : _pixelX(minXpix, maxXpix),
         _pixelY(minYpix, maxYpix),
         _depth(minDepth, maxDepth),
-        _time(minTime, maxTime),
         _gen(_rd()),
         _planner(planner),
         _sampling_mode(sampling_mode) {}
@@ -300,13 +297,10 @@ class SteeringPlanner {
           _planner->_depthScale *
           _planner->_depthData[gen_y * _planner->_imageWidth + gen_x];
 
-        double sampled_depth = (pixel_depth - DEPTH_UPPER_BOUND) *
-                                     (pixel_depth - DEPTH_LOWER_BOUND) <=
-                                   0
+        double sampled_depth = (pixel_depth - DEPTH_UPPER_BOUND) * (pixel_depth - DEPTH_LOWER_BOUND) <= 0
                                  ? (gen_depth - DEPTH_LOWER_BOUND) /
-                                       (DEPTH_UPPER_BOUND - DEPTH_LOWER_BOUND) *
-                                       (pixel_depth - DEPTH_LOWER_BOUND) +
-                                     DEPTH_LOWER_BOUND
+                                       (DEPTH_UPPER_BOUND - DEPTH_LOWER_BOUND) * (pixel_depth - DEPTH_LOWER_BOUND)
+                                       + DEPTH_LOWER_BOUND
                                  : gen_depth;
         _planner->DeprojectPixelToPoint(gen_x, gen_y, sampled_depth,
                                         endpoint_position);
@@ -342,8 +336,6 @@ class SteeringPlanner {
     std::uniform_real_distribution<> _pixelY;
     //! [meters]
     std::uniform_real_distribution<> _depth;
-    //! [seconds]
-    std::uniform_real_distribution<> _time;
     std::random_device _rd;
     std::mt19937 _gen;
     //! Pointer to SteeringPlanner where camera intrinsics are defined
@@ -472,7 +464,7 @@ class SteeringPlanner {
   std::vector<Pyramid> _pyramids;
 
   //! The steering amount in degree
-  float _steering_amount;
+  float steering_direction;
 
 };
 }  // namespace RectangularPyramidPlanner
