@@ -183,13 +183,10 @@ int SteeringPlanner::scan_depth() {
       }
     }
   }
-  if (min_depth_x < _cx) {
-    return 1;
-  }
-
-  else {
+  if (min_depth_x < _cx)
     return -1;
-  }
+  else
+    return 1;
 }
 
 std::vector<SegmentThirdOrder> SteeringPlanner::get_segments(
