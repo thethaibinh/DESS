@@ -69,7 +69,7 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   if (trajectory_queue_.size()) {
     if (check_valid_trajectory(_state, trajectory_queue_.front()) &&
         // autopilot_state_ == States::START) {
-        point_time > 1.2f) {
+        point_time > (reference_trajectory_.get_duration() / 2)) {
       reference_trajectory_ = trajectory_queue_.front();
       // ROS_WARN("[%s] Duration %f", pnh_.getNamespace().c_str(),
       //          reference_trajectory_.get_duration());
@@ -468,7 +468,7 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
     polynomial_trajectory.points.push_back(p);
   }
   // if (autopilot_state_ == States::START)
-  visual_pub.publish(polynomial_trajectory);
+  // visual_pub.publish(polynomial_trajectory);
 
   // Publish pyramids
   std::vector<Pyramid> pyramids = planner.GetPyramids();
