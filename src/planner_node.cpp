@@ -83,7 +83,8 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   geometry_msgs::Point goal_in_world_frame;
   goal_in_world_frame.x = goal_x_world_coordinate;
   goal_in_world_frame.y = goal_y_world_coordinate;
-  goal_in_world_frame.z = goal_z_world_coordinate;
+  // only check distance to goal horizontally for switching control
+  goal_in_world_frame.z = _state.pose.position.z;
 
   double distance_to_goal =
     (quadrotor_common::geometryToEigen(_state.pose.position) -
@@ -96,7 +97,7 @@ void PlannerNode::state_callback(const dodgeros_msgs::QuadState& state) {
   // Stop planning when the goal is less than 1.5m close.
   else if (autopilot_state_ == States::TRAJECTORY_CONTROL &&
            (distance_to_goal < 3 ||
-            _state.pose.position.x > goal_x_world_coordinate)) {
+            (_state.pose.position.x + 1) > goal_x_world_coordinate)) {
     setAutoPilotStateForced(States::GO_TO_GOAL);
   }
 
