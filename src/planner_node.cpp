@@ -407,7 +407,7 @@ void PlannerNode::msgCallback(const sensor_msgs::ImageConstPtr& depth_msg) {
     // We only sent steering commands when we could not find
     // any feasible trajectory for 1 second in a row.
     const std::lock_guard<std::mutex> lock(state_mutex_);
-    if (ros::Duration(ros::Time::now() - last_feasible_planning_time).toSec() <
+    if (ros::Duration(ros::Time::now() - last_feasible_planning_time).toSec() >
           0.2 &&
         autopilot_state_ == States::TRAJECTORY_CONTROL) {
       steering_value = planner.get_steering() / 8;
